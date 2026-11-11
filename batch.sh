@@ -2,6 +2,7 @@
 # Batch stage: GitHub's main plus the chosen open PRs, merged in order into this checkout (the pipeline's own
 # worktree, never your working copy). Usage: batch.sh [PR number...]. Writes .pipeline-batch: base sha, then "number sha".
 # PIPELINE_BASE (a commit) starts from there instead of main: the app sets it to stack this batch on one being deployed.
+# A PR that clashes with main or with a PR added before it is left out (a "!! " line says why); the rest still go in.
 set -euo pipefail
 cd "${PIPELINE_WORK:?run from the pipeline app}"
 BASE=${PIPELINE_BRANCH:-main}
@@ -34,12 +35,12 @@ for n in "$@"; do
   git log -1 --format='%h %s' "$sha"
   if ! git merge -q --no-ff --no-edit -m "Batch: PR #$n" "$sha"; then
     git merge --abort || true
-    echo "PR #$n clashes with main or with a PR added before it. Fix the clash on GitHub, or leave it out of this batch." >&2
-    exit 1
+    echo "!! Left out PR #$n: it clashes with main or with a PR added before it. Fix the clash on GitHub and build again."
+    continue
   fi
   echo "$n $sha" >> .pipeline-batch
 done
 
 say "Batch ready"
 git log --oneline "$base..HEAD" | cat
-[ "$#" -gt 0 ] || echo "No PRs picked: the batch is main as it is."
+[ "$(wc -l < .pipeline-batch)" -gt 1 ] || echo "No PRs in the batch: it is main as it is."

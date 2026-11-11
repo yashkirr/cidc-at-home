@@ -60,7 +60,7 @@ const makeStages = (config) => [
   ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
 const newRun = (work, picked = [], buildEnv = {}, under = null) =>
-  ({ work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, mergeFailed: false, stages: makeStages(state.config) });
+  ({ work, picked, leftOut: [], buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, mergeFailed: false, stages: makeStages(state.config) });
 
 const deploying = () => (state?.deploy && !state.deploy.done ? state.deploy : null);
 const building = () => !!state && state.build !== deploying() && !!state.build.child;
@@ -84,7 +84,7 @@ function view(withLogs = false) {
   return {
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
-    picked: b.picked, buildOk: b.buildOk, stackedOn: b.under?.picked ?? null,
+    picked: b.picked, leftOut: b.leftOut, buildOk: b.buildOk, stackedOn: b.under?.picked ?? null,
     building: building(), deploying: !!dep, deployingPrs: dep?.picked ?? [], deployWork: state.deploy?.work ?? null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
     stages: stages.map(({ env, run, log, ...s }) => (withLogs ? { ...s, log } : s)),
@@ -111,6 +111,7 @@ function capture(cmd, args, cwd) {
 }
 
 // Runs one stage in the lane's worktree. Lines starting "== " are the stage's steps; the last step fails if the stage does.
+// A line starting "!! " marks the current step skipped without failing the stage.
 function runStage(run, stage, extraArgs, env) {
   return new Promise((res) => {
     Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
@@ -152,6 +153,10 @@ function addLine(stage, raw) {
     stage.steps.push({ name: step[1], status: 'running' });
     send({ type: 'state', state: view() });
   }
+  if (line.startsWith('!! ') && stage.steps.at(-1)?.status === 'running') {
+    stage.steps.at(-1).status = 'skipped';
+    send({ type: 'state', state: view() });
+  }
   stage.log.push(line);
   if (stage.log.length > MAX_LOG) stage.log.splice(0, stage.log.length - MAX_LOG);
   send({ type: 'log', stage: stage.id, line });
@@ -174,6 +179,9 @@ async function build(picked, env) {
   state.error = null;
   send({ type: 'state', state: view(true) });
   if (!(await runStage(run, run.stages[0], picked.map(String), under ? { ...env, PIPELINE_BASE: under.head } : env))) return;
+  // The batch is what batch.sh managed to merge; clashing PRs were left out and won't be merged or deployed.
+  run.picked = readFileSync(join(work, '.pipeline-batch'), 'utf8').trim().split('\n').slice(1).map((l) => Number(l.split(' ')[0]));
+  run.leftOut = picked.filter((n) => !run.picked.includes(n));
   // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
   refreshStagesFromBatch(run);
   send({ type: 'state', state: view(true) });

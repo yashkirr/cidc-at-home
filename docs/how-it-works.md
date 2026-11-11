@@ -24,8 +24,9 @@ working copy is never touched, so you can keep coding while a build runs.
 
 1. Fetch the branch from GitHub and reset the private copy to it. Leftover files from the last run are removed, but
    ignored files (caches, `node_modules`) are kept.
-2. For each ticked pull request, in order: fetch it from GitHub (`pull/<number>/head`) and merge it. If two pull
-   requests clash, the stage fails and names the one that did not fit.
+2. For each ticked pull request, in order: fetch it from GitHub (`pull/<number>/head`) and merge it. A pull request
+   that clashes with the branch or with one merged before it is left out: its step turns amber, the log says why,
+   and the rest of the batch goes on. Only the pull requests that went in are merged and deployed.
 3. Write `.pipeline-batch`: the branch's commit, then each pull request with the exact commit that was merged.
 
 Then your **build stages** run, one after another, in the batch. Every stage must pass for Deploy to unlock.
