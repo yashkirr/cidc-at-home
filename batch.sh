@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Batch stage: GitHub's main plus the chosen open PRs, merged in order into this checkout (the pipeline's own
 # worktree, never your working copy). Usage: batch.sh [PR number...]. Writes .pipeline-batch: base sha, then "number sha".
-# PIPELINE_BASE (a commit) starts from there instead of main: the app sets it to stack this batch on one being deployed.
+# PIPELINE_BASE (a commit) starts from there instead of main: the app sets it to stack this batch on one being deployed,
+# or, with PIPELINE_ROLLBACK (a build number), to rebuild the commit an earlier build deployed.
 # Every picked PR is tried, so one run names all the PRs that clash; then the stage fails. Nothing is left out silently.
 set -euo pipefail
 cd "${PIPELINE_WORK:?run from the pipeline app}"
@@ -19,7 +20,9 @@ git checkout -qf --detach "$start"
 git reset -q --hard "$start"
 git clean -qfd  # untracked files only; ignored build caches (node_modules and so on) stay
 base=$(git rev-parse HEAD)
-if [ -n "${PIPELINE_BASE:-}" ]; then
+if [ -n "${PIPELINE_ROLLBACK:-}" ]; then
+  echo "Rollback: the commit build #$PIPELINE_ROLLBACK deployed, $(git log -1 --format='%h %s')"
+elif [ -n "${PIPELINE_BASE:-}" ]; then
   echo "Stacked on the batch being deployed: main plus"
   git log --format='  %s' "origin/$BASE..HEAD" | grep '^  Batch: PR' || echo "  (no PRs)"
 else

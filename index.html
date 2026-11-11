@@ -232,7 +232,7 @@ function draw() {
   const queueNode = `<div class="node queue" role="group" aria-label="Deploy queue">
       <span class="top">Queue</span>
       <span class="who">${state.queue.length ? `<span class="chip">${state.queue.length} waiting</span>` : '<span class="none">Empty</span>'}</span>
-      <span class="time">${state.paused ? 'Paused after a failed deploy' : 'Deploys in this order'}</span>
+      <span class="time">${state.paused ? 'Paused. Nothing deploys until you resume' : 'Deploys in this order'}</span>
       <div class="under">${state.paused ? '<button class="btn small" id="resume">Resume queue</button>' : ''}${state.queue.length ? `<ol>${state.queue.map(qItem).join('')}</ol>` : ''}</div>
     </div>`;
   const gateNode = `<div class="node gate" role="group" aria-label="Deploy">
@@ -242,7 +242,7 @@ function draw() {
     </div>`;
   const liveNode = `<div class="node live" role="group" aria-label="Live in ${env}">
       <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${env}</span>
-      <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>` : '<span class="none">Nothing yet</span>'}</span>
+      <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
       <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
       <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
     </div>`;
@@ -268,13 +268,20 @@ function drawHistory() {
   $('history').innerHTML = state.builds.length ? state.builds.map((b) => `<li>
       <button class="hrow" data-build="${b.number}" aria-expanded="${openBuild === b.number}">
         <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + env : where[b.status] ?? b.status}</span></span>
-        <span class="what">${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
+        <span class="what">${b.rollbackOf ? `Rollback to #${b.rollbackOf}: ` : ''}${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
         <time>${new Date(b.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
       </button>
-      ${openBuild === b.number ? `<div class="hdetail">${buildStages.length ? buildStages.map((s) => `<button class="btn" data-log="${s.id}">${icon(s.status)}${esc(s.name)}</button>`).join('') : '<span class="none">Logs are only kept while the app runs.</span>'}</div>` : ''}
+      ${openBuild === b.number ? `<div class="hdetail">${buildStages.length ? buildStages.map((s) => `<button class="btn" data-log="${s.id}">${icon(s.status)}${esc(s.name)}</button>`).join('') : '<span class="none">Logs are only kept while the app runs.</span>'}
+        ${b.deployedSha && b.status !== 'live' ? `<button class="btn primary" data-rollback="${b.number}" ${state.deploying ? 'disabled' : ''}>Roll back ${env} to build #${b.number}</button>` : ''}</div>` : ''}
     </li>`).join('') : '<li class="empty">No builds yet.</li>';
 }
 $('history').addEventListener('click', async (e) => {
+  const rb = e.target.closest('[data-rollback]');
+  if (rb) {
+    const n = Number(rb.dataset.rollback);
+    if (confirm(`Roll ${state.config.environment} back to build #${n}? This rebuilds the commit it deployed and runs the deploy stages. Main on GitHub is not changed, and the queue pauses until you resume it.`)) post('/api/rollback', { number: n, profile: profile.value.trim() });
+    return;
+  }
   const lg = e.target.closest('[data-log]');
   if (lg) { const s = buildStages.find((x) => x.id === lg.dataset.log); viewing = { ...s, number: openBuild }; render(); $('log').scrollIntoView({ block: 'nearest' }); return; }
   const row = e.target.closest('[data-build]');

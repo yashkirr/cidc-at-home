@@ -70,6 +70,10 @@ pull requests and build them while the deploy runs.
 - **All builds** (bottom of the page) lists every build, newest first: its PRs, when it was built, and where it is now
   (building, bad, queued, deploying, live, was live, deploy failed). Click one to see its stages, and click a stage for
   its log. Logs are kept while the app runs; the list itself is saved with the build numbers.
+- **Rollback:** open a build that was live in **All builds** and press **Roll back**. The app rebuilds the commit that
+  build deployed (main as it was then) and runs the deploy stages, as a new build marked "rollback to #N". Main on
+  GitHub is not changed, so it is now ahead of what is live. The queue pauses so the next deploy does not ship the bad
+  change again: revert it on GitHub (a normal PR), then **Resume queue**.
 - **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
 - If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
   stacked on it is marked bad and dropped, because it was built on code main does not have.
