@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, chmodSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,11 +14,12 @@ const sh = (cwd, cmd) => execFileSync('bash', ['-c', cmd], { cwd, encoding: 'utf
 test('build a batch with a PR, then deploy merges it and runs the deploy stages', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pipeline-'));
   const remote = join(tmp, 'remote.git'), repo = join(tmp, 'repo'), bin = join(tmp, 'bin'), home = join(tmp, 'home');
-  mkdirSync(bin); mkdirSync(home);
+  mkdirSync(bin); mkdirSync(home); writeFileSync(join(tmp, 'checkgate'), '');
   sh(tmp, `git init -q --bare -b main remote.git && git clone -q remote.git repo`);
   writeFileSync(join(repo, 'pipeline.json'), JSON.stringify({
     environment: 'test',
-    build: [{ name: 'Checks', run: 'echo "== Lint"; echo ok; echo "== Tests"; test -f a.txt && test -f pr.txt' }],
+    // Checks wait for checkgate, so the test can start a build while the one before is still checking.
+    build: [{ name: 'Checks', run: `echo "== Lint"; until [ -f "${join(tmp, 'checkgate')}" ]; do sleep 0.1; done; echo ok; echo "== Tests"; test -f a.txt && test -f pr.txt` }],
     // Waits for the test to open the gate, so the next batch is built while this deploy is still running.
     deploy: [{ name: 'Release', run: `echo "== Upload"; until [ -f "${join(tmp, 'gate')}" ]; do sleep 0.1; done; echo "$WHO" > deployed.txt`, env: { WHO: 'me' } }],
   }));
@@ -105,6 +106,17 @@ esac
     const record = JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json'));
     assert.equal(record.next, 5);
     assert.deepEqual(record.live.test.prs, []);
+
+    // The next build can start while the one before it is still in its checks: build #5 goes into the queue, and
+    // build #6 is stacked on it. #5 deploys on its own once green.
+    rmSync(join(tmp, 'checkgate'));
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.build.number === 5 && s.running.includes('build0') && s.canBuild, 'build #5 in its checks');
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.build.number === 6 && s.queue.map((b) => b.number).join() === '5', 'build #5 queued, #6 building');
+    assert.equal(state.stackedOn, 5);
+    writeFileSync(join(tmp, 'checkgate'), '');
+    await until((s) => s.live?.number === 5 && s.build.number === 6 && s.buildOk, 'build #5 live, #6 green');
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
