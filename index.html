@@ -180,12 +180,16 @@ function draw() {
   const merged = state.picked.length ? `merges ${state.picked.map((x) => '#' + x).join(', ')} into ${state.config.branch} on GitHub, then deploys.` : `deploys ${state.config.branch} as it is.`;
   const arrow = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
   const stacked = state.stackedOn ? `, stacked on ${state.stackedOn.length ? state.stackedOn.map((x) => '#' + x).join(', ') : 'the deploy'}` : '';
-  const gate = state.buildOk && state.deploying ? 'Build passed. Unlocks when the deploy that is running finishes.'
+  const queue = !(state.buildOk && !state.deploying);
+  const gate = state.queued ? `Queued. Deploys on its own once ${busy ? 'the build passes' : ''}${busy && state.deploying ? ' and ' : ''}${state.deploying ? 'the deploy in front finishes' : ''}.`
+    : state.buildOk && state.deploying ? 'Build passed. Queue it to deploy once the running deploy finishes.'
+    : busy ? 'Queue it now to deploy as soon as the build passes.'
     : state.buildOk ? 'Build passed. This ' + merged
     : state.deploying && !busy ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
   $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
     <div class="row"><h3>2. Deploy<small>Your click</small></h3><div class="group">
-      <div class="gate"><button class="btn primary" id="deploy" ${state.buildOk && !busy && !state.deploying ? '' : 'disabled'}>Deploy to ${esc(state.config.environment)}</button>
+      <div class="gate">${state.queued ? '<button class="btn" id="unqueue">Take off queue</button>'
+        : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'} to ${esc(state.config.environment)}</button>`}
         <p>${gate}</p></div>
       ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
   $('stopBuild').hidden = !busy;
@@ -239,7 +243,12 @@ $('prs').addEventListener('change', (e) => { const n = Number(e.target.value); e
 $('flow').addEventListener('click', (e) => {
   if (e.target.closest('#deploy')) {
     const what = state.picked.length ? `merge PR ${state.picked.map((x) => '#' + x).join(', ')} on GitHub and deploy` : `deploy ${state.config.branch}`;
-    if (confirm(`This will ${what} to ${state.config.environment}. Go?`)) post('/api/deploy');
+    const when = state.buildOk && !state.deploying ? '' : ' once it is ready';
+    if (confirm(`This will ${what} to ${state.config.environment}${when}. Go?`)) post('/api/deploy');
+    return;
+  }
+  if (e.target.closest('#unqueue')) {
+    post('/api/deploy', { queue: false });
     return;
   }
   const card = e.target.closest('.stage');

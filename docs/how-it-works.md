@@ -58,7 +58,10 @@ pull requests and build them while the deploy runs.
   files the deploy is using. Its ignored caches (`node_modules` and so on) start cold the first time.
 - It is **stacked** on the batch being deployed: `batch.sh` starts from that batch's tested commit (`PIPELINE_BASE`)
   instead of the branch on GitHub, then merges the new pull requests on top. The ones being deployed are greyed out.
-- Deploys still go one at a time. The next batch's **Deploy** button unlocks when the running deploy finishes.
+- Deploys still go one at a time. While one runs, the next batch's button says **Queue deploy**. Press it while the
+  batch is still building or once it is green: it deploys on its own as soon as it is green and the deploy in front has
+  finished. **Take off queue** undoes it. If the deploy in front fails or is stopped, the queue is cleared, so nothing
+  goes out on top of a broken deploy without you looking first.
 - **Merge on GitHub** checks that the branch on GitHub has the same *files* the batch was built on. Once the batch
   under it is merged, it does, so the stacked batch deploys without a rebuild. If the batch under it did not merge, the
   page asks you to build again, and the merge stage refuses anyway.

@@ -85,7 +85,7 @@ function view(withLogs = false) {
   return {
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
-    picked: b.picked, buildOk: b.buildOk, stackedOn: b.under?.picked ?? null,
+    picked: b.picked, buildOk: b.buildOk, queued: !!b.queued && (b.buildOk || building()), stackedOn: b.under?.picked ?? null,
     building: building(), deploying: !!dep, deployingPrs: dep?.picked ?? [], deployWork: state.deploy?.work ?? null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
     stages: stages.map(({ env, run, log, ...s }) => (withLogs ? { ...s, log } : s)),
@@ -187,6 +187,7 @@ async function build(picked, env) {
   if (under?.mergeFailed) state.error = 'The batch this one was stacked on did not merge, so build again.';
   else run.buildOk = true;
   send({ type: 'state', state: view(true) });
+  if (run.buildOk && run.queued && !deploying()) startDeploy();
 }
 
 function refreshStagesFromBatch(run) {
@@ -198,15 +199,15 @@ function refreshStagesFromBatch(run) {
 // Same AWS profile as the build that was checked, whatever the box says now.
 async function deploy() {
   const run = state.deploy = state.build;
-  run.buildOk = false; // one deploy per green build
+  run.buildOk = run.queued = false; // one deploy per green build
   run.head = git(run.work, 'rev-parse', 'HEAD'); // what a batch built during this deploy stacks on
   try {
     for (const s of run.stages.filter((s) => s.group === 'deploy')) {
       if (await runStage(run, s, [], run.buildEnv)) continue;
       if (s.id === 'merge') {
         run.mergeFailed = true;
-        if (state.build.under === run && state.build.buildOk) {
-          state.build.buildOk = false;
+        if (state.build.under === run && (state.build.buildOk || state.build.queued)) {
+          state.build.buildOk = state.build.queued = false; // never deploy a batch stacked on one that did not merge
           state.error = 'The deploy before this batch did not merge, and this batch was stacked on it. Build again.';
         }
       }
@@ -216,8 +217,17 @@ async function deploy() {
     run.done = true;
     send({ type: 'state', state: view(true) });
     loadPrs().catch(() => {}); // merged PRs drop off the list
+    // A failed or stopped deploy holds the queue: you look first, then press Deploy.
+    if (state.build.queued) {
+      if (!run.stages.every((s) => s.group !== 'deploy' || s.status === 'passed')) {
+        state.build.queued = false;
+        state.error ??= 'The deploy did not finish, so the queued batch was taken off the queue. Check, then press Deploy.';
+        send({ type: 'state', state: view() });
+      } else if (state.build.buildOk) startDeploy();
+    }
   }
 }
+const startDeploy = () => deploy().catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
 
 // HTTP. Only this machine, only this page: Host must be ours, and every POST carries the page's secret token.
 const page = readFileSync(join(HERE, 'index.html'), 'utf8');
@@ -259,10 +269,13 @@ const server = http.createServer(async (req, res) => {
         break;
       }
       case '/api/deploy':
-        if (deploying()) throw new Error('Wait for the deploy that is running to finish. Deploys go one at a time.');
-        if (building()) throw new Error('Wait for the build to finish.');
-        if (!state?.build.buildOk) throw new Error('Run a build first. Deploy unlocks when every build stage passes.');
-        deploy().catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+        // Deploys go one at a time. A batch still building, or green while another deploys, is queued: it deploys
+        // on its own once it is green and nothing is deploying. queue: false takes it off the queue.
+        if (b.queue === false) { if (state?.build) state.build.queued = false; send({ type: 'state', state: view() }); break; }
+        if (!state?.build.buildOk && !building()) throw new Error('Run a build first. Deploy unlocks when every build stage passes.');
+        if (state.build.buildOk && !deploying()) { startDeploy(); break; }
+        state.build.queued = true;
+        send({ type: 'state', state: view() });
         break;
       case '/api/stop':
         // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.

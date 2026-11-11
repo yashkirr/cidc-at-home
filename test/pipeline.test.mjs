@@ -1,5 +1,5 @@
 // End to end: a throwaway repo with four open PRs (3 and 4 clash with 1), a fake gh, and fake stages. Build main + PR 1 and deploy it; while
-// that deploy runs, build PR 2 stacked on it; then deploy PR 2. Main on the "GitHub" remote ends up with both merged.
+// that deploy runs, build PR 2 stacked on it; then queue PR 2, which deploys on its own. Main on the "GitHub" remote ends up with both merged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -80,18 +80,16 @@ esac
     await until((s) => s.buildOk, 'green stacked build');
     assert.deepEqual(state.stackedOn, [1]);
     assert.notEqual(state.work, state.deployWork);
-    assert.equal((await post('/api/deploy')).status, 400, 'one deploy at a time');
+    // Deploys go one at a time, so Deploy now queues PR 2 behind PR 1; it goes on its own when PR 1 is done.
+    assert.equal((await post('/api/deploy')).status, 200);
+    await until((s) => s.queued, 'PR 2 queued');
 
     writeFileSync(join(tmp, 'gate'), '');
-    await until((s) => !s.deploying, 'deploy of PR 1 finished');
-    assert.match(sh(tmp, `git --git-dir=remote.git log -1 --format=%s main`), /Merge pull request #1/);
-    assert.equal(sh(state.deployWork, 'cat deployed.txt').trim(), 'me');
-
-    assert.equal((await post('/api/deploy')).status, 200);
-    await until((s) => !s.deploying && s.stages.at(-1).status !== 'waiting', 'deploy of PR 2 finished');
+    await until((s) => !s.deploying && !s.queued && s.stages.at(-1).status === 'passed', 'PR 1 then PR 2 deployed');
     assert.deepEqual(state.stages.map((s) => s.status), ['passed', 'passed', 'passed', 'passed']);
-    assert.match(sh(tmp, `git --git-dir=remote.git log -1 --format=%s main`), /Merge pull request #2/);
+    assert.equal(sh(tmp, `git --git-dir=remote.git log --format=%s main | grep 'Merge pull request'`), 'Merge pull request #2\nMerge pull request #1\n');
     assert.equal(sh(tmp, 'git --git-dir=remote.git show main:pr.txt main:pr2.txt'), 'pr\npr2\n');
+    assert.equal(sh(state.deployWork, 'cat deployed.txt').trim(), 'me');
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
