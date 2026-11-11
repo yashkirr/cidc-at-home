@@ -68,7 +68,9 @@ const newRun = (work, picked = [], buildEnv = {}, under = null, number = null) =
 
 const deploying = () => (state?.deploy && !state.deploy.done ? state.deploy : null);
 const building = () => !!state && state.build !== deploying() && !!state.build.child;
-const children = () => [state?.build.child, state?.deploy?.child].filter(Boolean);
+// The next build can start once the newest one has its batch (its commit to stack on), even while its checks run.
+const batching = () => building() && !state.build.head;
+const children = () => [...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])].map((r) => r?.child).filter(Boolean);
 const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
 const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
 
@@ -80,7 +82,7 @@ function status(r) {
   if (state.queue.includes(r)) return 'queued';
   return r.buildOk ? 'good' : r.stages.some((s) => s.status === 'running') ? 'building' : 'new';
 }
-const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad };
+const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad, building: r.stages.some((s) => s.group === 'build' && s.status === 'running') };
 
 function openRepo(dir) {
   if (children().length) throw new Error('Wait for the running stage to finish, or stop it.');
@@ -106,7 +108,7 @@ function view(withLogs = false) {
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
     live: state.record.live[state.config.environment] ?? null, deployingBuild: summary(dep), deployRow: d.number,
-    building: building(), deploying: !!dep, deployingPrs: inFlight().flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
+    building: building(), canBuild: !batching(), deploying: !!dep, deployingPrs: [...inFlight(), ...(building() ? [b] : [])].flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
     stages: stages.map(({ env, run, log, ...s }) => (withLogs ? { ...s, log } : s)),
   };
@@ -192,7 +194,9 @@ function ensureWorktree(work) {
 
 // A new build is stacked on the last build in flight (queued or deploying), in a worktree none of them is using.
 // Once the one under it is merged, main has the same files as its tested commit, so it can go next without a rebuild.
+// A build still running its checks goes into the queue first: the new one is stacked on it, so it must deploy first.
 async function build(picked, env) {
+  if (building() && !state.queue.includes(state.build)) state.queue.push(state.build);
   const under = inFlight().at(-1) ?? null;
   const used = inFlight().map((r) => r.work);
   const work = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i === 0 ? state.work : i === 1 ? `${state.work}-next` : `${state.work}-${i + 1}`)).find((w) => !used.includes(w));
@@ -204,14 +208,16 @@ async function build(picked, env) {
   send({ type: 'state', state: view(true) });
   let ok = await runStage(run, run.stages[0], picked.map(String), under ? { ...env, PIPELINE_BASE: under.head } : env);
   if (ok) {
+    run.head = git(run.work, 'rev-parse', 'HEAD'); // what the next build stacks on
+    send({ type: 'state', state: view() });
     // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
     refreshStagesFromBatch(run);
     send({ type: 'state', state: view(true) });
     for (const s of run.stages.filter((s) => s.group === 'build' && s.id !== 'batch')) if (!(ok = await runStage(run, s, [], env))) break;
   }
-  if (ok && under?.bad) run.bad = `Build #${under.number} under it did not make it, so build again.`;
-  else if (ok) Object.assign(run, { buildOk: true, head: git(run.work, 'rev-parse', 'HEAD') }); // what the next build stacks on
-  else state.queue = state.queue.filter((r) => r !== run); // nothing is stacked on it yet: Build was busy
+  if (!ok) drop(run, 'failed its build'); // and every build stacked on it while its checks ran
+  else if (under?.bad || under?.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) run.bad ??= `Build #${under.number} under it did not make it, so build again.`;
+  else if (!run.bad) run.buildOk = true;
   send({ type: 'state', state: view(true) });
   pump();
 }
@@ -296,16 +302,18 @@ const server = http.createServer(async (req, res) => {
       case '/api/prs': await loadPrs(); break;
       case '/api/build': {
         if (!state) throw new Error('Add a repo first.');
-        if (building()) throw new Error('A build is already running.');
+        if (batching()) throw new Error('Wait for Batch PRs to finish. The next build stacks on its result.');
         const picked = (b.prs ?? []).map(Number);
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
-        if (picked.some((n) => inFlight().some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is queued or deploying.');
+        const busy = [...inFlight(), ...(building() ? [state.build] : [])];
+        if (picked.some((n) => busy.some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is running, queued or deploying.');
         build(picked, profileEnv(b.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
         break;
       }
       case '/api/deploy': {
         // Queue the newest build. It deploys on its own once it is green and every build in front of it has deployed.
         const r = state?.build;
+        if (r?.bad) throw new Error(r.bad);
         if (!r?.buildOk && !building()) throw new Error('Run a build first. Deploy unlocks when every build stage passes.');
         if (!state.queue.includes(r)) state.queue.push(r);
         pump();
@@ -321,7 +329,7 @@ const server = http.createServer(async (req, res) => {
         break;
       case '/api/stop':
         // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.
-        for (const c of b.lane === 'build' ? [building() && state.build.child] : b.lane === 'deploy' ? [deploying()?.child] : children()) if (c) process.kill(-c.pid, 'SIGTERM');
+        for (const c of b.lane === 'build' ? [state.build, ...state.queue].filter((r) => r !== deploying()).map((r) => r.child) : b.lane === 'deploy' ? [deploying()?.child] : children()) if (c) process.kill(-c.pid, 'SIGTERM');
         break;
       default: return json(res, 404, { error: 'No such action.' });
     }

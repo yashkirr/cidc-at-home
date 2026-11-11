@@ -180,16 +180,16 @@ function draw() {
   if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
   $('envName').textContent = `to ${state.config.environment}`;
   const busy = state.building, inDeploy = (n) => state.deployingPrs.includes(n);
-  const inBuild = (n) => [state.deployingBuild, ...state.queue].find((b) => b?.prs.some((p) => p.number === n));
+  const inBuild = (n) => [state.deployingBuild, ...state.queue, state.build].find((b) => b?.prs.some((p) => p.number === n));
   showError(state.error);
 
   $('prs').innerHTML = state.prs.length ? state.prs.map((p) => `<li><label>
-      <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft && !inDeploy(p.number) ? 'checked' : ''} ${busy || p.draft || inDeploy(p.number) ? 'disabled' : ''}>
+      <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft && !inDeploy(p.number) ? 'checked' : ''} ${!state.canBuild || p.draft || inDeploy(p.number) ? 'disabled' : ''}>
       <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? `<span class="tag">in build #${inBuild(p.number)?.number}</span>` : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
     </label></li>`).join('') : '<li class="empty">No open pull requests.</li>';
   const n = pickable().length;
-  $('build').textContent = (state.deploying ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
-  $('build').disabled = busy;
+  $('build').textContent = (state.deploying || state.building || state.queue.length ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
+  $('build').disabled = !state.canBuild;
   $('refresh').disabled = false;
 
   const build = state.stages.filter((s) => s.group === 'build');
@@ -207,7 +207,7 @@ function draw() {
     : state.deploying ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
   const env = esc(state.config.environment), l = state.live;
   const qItem = (b, i) => {
-    const st = state.building && state.build.number === b.number ? 'Building' : 'Green';
+    const st = b.building ? 'Building' : 'Green';
     const last = i === state.queue.length - 1;
     return `<li><span class="chip ${st === 'Green' ? 'passed' : 'running'}">#${b.number}</span><span>${st}</span>${last ? `<button class="btn" data-remove="${b.number}" aria-label="Take build #${b.number} off the queue">Remove</button>` : ''}</li>`;
   };

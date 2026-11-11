@@ -64,6 +64,9 @@ pull requests and build them while the deploy runs.
 - Deploys go one at a time. While one runs, Deploy says **Queue deploy**. Press it while the build is still running
   or once it is green. Queued builds deploy on their own, oldest first, each once it is green. The queue can hold
   several builds (each in its own worktree, up to 10 in flight), each stacked on the one in front of it.
+- You don't have to wait for checks. Once a build's **Batch PRs** stage passes, **Build** unlocks again: the running
+  build moves into the queue, and the new one is stacked on it. If the build in front then fails its checks, every
+  build stacked on it is marked bad. Up to 10 builds can be in flight, one worktree each.
 - **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
 - If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
   stacked on it is marked bad and dropped, because it was built on code main does not have.
