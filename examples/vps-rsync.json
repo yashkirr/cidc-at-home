@@ -1,0 +1,13 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Install", "run": "npm ci" },
+    { "name": "Tests", "run": "npm test" },
+    { "name": "Build", "run": "npm run build" }
+  ],
+  "deploy": [
+    { "name": "Upload", "run": "rsync -az --delete dist/ \"$SERVER:/var/www/app/\"", "env": { "SERVER": "deploy@203.0.113.10" } },
+    { "name": "Restart", "run": "ssh \"$SERVER\" 'sudo systemctl restart app'", "env": { "SERVER": "deploy@203.0.113.10" } }
+  ]
+}

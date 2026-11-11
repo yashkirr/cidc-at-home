@@ -1,1 +1,81 @@
-# cidc-at-home
+# CI/CD at home
+
+Your own CI/CD pipeline, running on your own machine. No GitHub Actions minutes, no runners to rent.
+
+It is a small web page that does two things:
+
+1. **Build** (one click). It takes your main branch, merges in the open pull requests you tick, and runs your
+   checks on the result: lint, tests, build, whatever your repo needs. You watch every stage and step pass or fail.
+2. **Deploy** (one click, only after a green build). It merges those pull requests on GitHub, checks that main now
+   has exactly the code that was tested, then runs your deploy steps.
+
+What goes live is always what is on main, and always something that passed your checks.
+
+It works with any GitHub repo. You describe your stages in a small `pipeline.json` file in that repo.
+
+![The pipeline page after a green build](docs/screenshot.png)
+
+## Quick start
+
+You need [Node.js 22](https://nodejs.org/), git and the [GitHub CLI](https://cli.github.com/), signed in with
+`gh auth login`. There is nothing to install with npm.
+
+```sh
+git clone https://github.com/yashkirr/cidc-at-home.git
+cd cidc-at-home
+./start.sh /path/to/your/repo
+```
+
+On a Mac you can double-click `start.command` instead. Your browser opens http://localhost:4321/. Keep the terminal
+window open while you use it. Close it to stop.
+
+Then add a `pipeline.json` to your repo (see below), tick the pull requests you want, and press **Build**.
+
+## pipeline.json
+
+Put this at the root of each repo you want to build and deploy:
+
+```json
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Install", "run": "npm ci" },
+    { "name": "Checks", "run": "npm run lint && npm test" },
+    { "name": "Build", "run": "npm run build" }
+  ],
+  "deploy": [
+    { "name": "Upload", "run": "./scripts/deploy.sh", "env": { "TARGET": "prod" } }
+  ]
+}
+```
+
+Each stage is a shell command. It passes when it exits with 0. Any line it prints that starts with `== ` shows up as a
+step under the stage, so `echo "== Lint"` gives you a "Lint" step with its own tick.
+
+Full reference: [docs/pipeline-json.md](docs/pipeline-json.md). Ready-made setups: [examples/](examples/).
+
+## Docs
+
+- [Getting started](docs/getting-started.md): install, first run, adding repos.
+- [pipeline.json reference](docs/pipeline-json.md): every field, steps, environment variables.
+- [How it works](docs/how-it-works.md): the batch, the private copy, the merge check, what each button does.
+- [Moving off GitHub Actions](docs/moving-off-github-actions.md): turning workflow files into stages.
+- [Running it on a server](docs/server.md): use it on a VPS, safely.
+- [Security](docs/security.md): what it protects against and what it trusts.
+- [Troubleshooting](docs/troubleshooting.md): common errors and what to do.
+
+## What it is not
+
+- It does not run on every push by itself. You press Build when you want a build. That is the point: no minutes are
+  spent unless you choose to.
+- It does not post check results to GitHub pull requests. The page is where you see them.
+- It runs one pipeline at a time.
+
+## Tests
+
+```sh
+npm test
+```
+
+The test builds and deploys a throwaway repo against a fake GitHub, so it needs no network and touches nothing real.

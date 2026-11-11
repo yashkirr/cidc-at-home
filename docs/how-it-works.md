@@ -1,0 +1,67 @@
+# How it works
+
+## The pieces
+
+| File | What it is |
+|---|---|
+| `server.mjs` | The app. A small web server on 127.0.0.1 that runs the stages and streams their output to the page. |
+| `index.html` | The page. |
+| `batch.sh` | The **Batch PRs** stage: main plus the ticked pull requests. |
+| `merge.sh` | The **Merge on GitHub** stage. |
+| `start.command`, `start.sh` | Launchers. |
+
+Nothing else. No database: the app keeps the current run in memory, and the list of repos in
+`~/.cicd-at-home/repos.json`.
+
+## Build
+
+```
+Batch PRs  ->  your build stages  ->  (Deploy unlocks)
+```
+
+**Batch PRs** (`batch.sh`) works in a private copy of your repo, a git worktree in `~/.cicd-at-home/work/`. Your own
+working copy is never touched, so you can keep coding while a build runs.
+
+1. Fetch the branch from GitHub and reset the private copy to it. Leftover files from the last run are removed, but
+   ignored files (caches, `node_modules`) are kept.
+2. For each ticked pull request, in order: fetch it from GitHub (`pull/<number>/head`) and merge it. If two pull
+   requests clash, the stage fails and names the one that did not fit.
+3. Write `.pipeline-batch`: the branch's commit, then each pull request with the exact commit that was merged.
+
+Then your **build stages** run, one after another, in the batch. Every stage must pass for Deploy to unlock.
+
+## Deploy
+
+```
+Merge on GitHub  ->  your deploy stages
+```
+
+**Merge on GitHub** (`merge.sh`):
+
+1. Checks the branch on GitHub has not moved since the build. If someone pushed to it, the stage stops: build again.
+2. Merges each pull request on GitHub with the GitHub API, passing the commit that was tested. If anyone pushed to a
+   pull request after the build, GitHub refuses that merge, so nothing untested goes in.
+3. Fetches the branch again and compares its files with the tested batch (git tree hashes). Only if they are
+   identical does deploy go on.
+
+Then your **deploy stages** run in the same private copy, which now sits on the branch's new commit. Build output from
+the build stages (a `dist/` folder, a Terraform plan file) is still there, so deploy stages can ship exactly what was
+built and tested.
+
+## Why merge first, then deploy
+
+Deploying straight from a batch of unmerged pull requests would put code live that main does not have. The next deploy
+from main would then quietly remove it. Merging first, and checking main matches the batch, keeps "what is live" and
+"what is on main" the same thing.
+
+## Stop
+
+**Stop** sends SIGTERM to the whole running stage (its process group), not just the shell, so child processes stop too.
+Closing the app's terminal window does the same.
+
+A stopped batch can leave a half-done merge in the private copy. The next build cleans that up.
+
+## The page
+
+The page gets live updates over Server-Sent Events (`/events`): the full state when it connects, then each log line as
+it arrives. Open it in more than one tab if you like; they all show the same run.

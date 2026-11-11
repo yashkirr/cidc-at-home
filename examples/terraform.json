@@ -1,0 +1,11 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Checks", "run": "echo '== Format' && terraform fmt -check -recursive && echo '== Init' && terraform init -input=false && echo '== Validate' && terraform validate" },
+    { "name": "Plan", "run": "terraform plan -input=false -out=release.tfplan" }
+  ],
+  "deploy": [
+    { "name": "Apply", "run": "terraform apply -input=false release.tfplan" }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Install", "run": "npm ci" },
+    { "name": "Checks", "run": "echo '== Lint' && npm run lint && echo '== Types' && npx tsc --noEmit && echo '== Tests' && npm test" },
+    { "name": "Build", "run": "npm run build" }
+  ],
+  "deploy": [
+    { "name": "Deploy", "run": "./scripts/deploy.sh" }
+  ]
+}

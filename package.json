@@ -1,0 +1,12 @@
+{
+  "name": "cicd-at-home",
+  "version": "1.0.0",
+  "description": "CI/CD on your own machine: batch pull requests, run your checks, then deploy with one click.",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Install", "run": "npm ci" },
+    { "name": "Checks", "run": "echo '== Lint' && npm run lint && echo '== Tests' && npm test" },
+    { "name": "Build", "run": "npm run build" }
+  ],
+  "deploy": [
+    {
+      "name": "Upload",
+      "run": "echo '== Sync' && aws s3 sync out/ \"s3://$BUCKET\" --delete && echo '== Clear CDN cache' && aws cloudfront create-invalidation --distribution-id \"$DISTRIBUTION_ID\" --paths '/*'",
+      "env": { "BUCKET": "my-site-bucket", "DISTRIBUTION_ID": "E1234567890ABC" }
+    },
+    { "name": "Smoke test", "run": "curl -fsS -o /dev/null https://example.com/" }
+  ]
+}

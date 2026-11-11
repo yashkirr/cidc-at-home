@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CI/CD at home</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --line: #e2e2dd; --text: #18181a; --muted: #67676d;
+    --accent: #c8102e; --accent-text: #ffffff;
+    --run: #1f6feb; --pass: #1a7f37; --fail: #c8102e; --stop: #9a6700; --wait: #a3a3a8;
+    --log-bg: #111113; --log-text: #e6e6e8;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f0f11; --panel: #18181b; --line: #2a2a2f; --text: #ededf0; --muted: #9a9aa2;
+      --accent: #c91d2f; --run: #4c8dff; --pass: #3fb950; --fail: #ff6b6b; --stop: #d4a72c; --wait: #5b5b63;
+      --log-bg: #09090b; color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button, input, select { font: inherit; color: inherit; }
+  header { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 17px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  select, input[type=text] { min-height: 40px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
+  input[type=text] { width: 160px; }
+  .grow { flex: 1; }
+  .btn { min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; font-weight: 600;
+         transition: transform 150ms var(--ease), opacity 150ms var(--ease); }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .btn.small { min-height: 36px; padding: 0 12px; font-size: 14px; }
+  ::selection { background: color-mix(in srgb, var(--run) 30%, transparent); }
+  ::placeholder { color: var(--muted); }
+  pre { scrollbar-color: var(--wait) transparent; }
+  :focus-visible { outline: 3px solid var(--run); outline-offset: 2px; }
+  main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 12px 16px; } }
+  section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
+  .prs { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 6px; max-height: 52vh; overflow: auto; }
+  .prs label { align-items: flex-start; color: var(--text); padding: 8px; border-radius: 8px; cursor: pointer; min-height: 44px; }
+  .prs label:hover { background: var(--bg); }
+  .prs input { width: 20px; height: 20px; margin: 2px 0 0; flex: none; accent-color: var(--accent); }
+  .prs small { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .tag { white-space: nowrap; font-size: 12px; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; color: var(--muted); margin-left: 4px; }
+  .empty { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
+  .flow { display: grid; gap: 14px; }
+  .row { display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: start; }
+  .row > h3 { margin: 12px 0 0; font-size: 14px; }
+  .row > h3 small { display: block; color: var(--muted); font-weight: 400; font-size: 13px; }
+  .group { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
+  @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 6px; } .row > h3 { margin: 0; } .group { flex-direction: column; } .stage, .gate { width: 100% !important; } .group .arrow { display: none; } }
+  .stage { width: 196px; flex: none; text-align: left; display: flex; flex-direction: column; justify-content: flex-start; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; cursor: pointer;
+           transition: transform 150ms var(--ease); }
+  .stage:active { transform: scale(0.98); }
+  .stage[aria-pressed=true] { border-color: var(--text); }
+  .stage .top { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .stage .time { display: block; color: var(--muted); font-size: 13px; margin: 2px 0 6px 26px; }
+  .steps { margin: 0; padding: 0 0 0 26px; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
+  .steps > span { display: flex; gap: 6px; align-items: center; }
+  .icon { width: 18px; height: 18px; flex: none; }
+  .steps .icon { width: 13px; height: 13px; }
+  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); }
+  .running.icon { animation: pulse 1.2s var(--ease) infinite; }
+  .arrow svg { width: 16px; height: 16px; display: block; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  .arrow { align-self: center; color: var(--muted); flex: none; }
+  .gate { width: 196px; flex: none; display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 12px; }
+  .gate p { margin: 0; font-size: 13px; color: var(--muted); }
+  .bar { display: flex; gap: 10px; align-items: center; margin: 16px 0 8px; flex-wrap: wrap; }
+  .bar h2 { margin: 0; }
+  pre { margin: 0; background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 12px; height: 46vh; overflow: auto; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 12%, transparent); color: var(--text); border: 1px solid var(--fail); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CI/CD at home <span id="envName"></span></h1>
+  <label>Repo <select id="repo" aria-label="Repo"></select></label>
+  <form id="addForm" style="display:flex;gap:8px"><input type="text" id="addPath" placeholder="/path/to/repo" aria-label="Add a repo folder"><button class="btn small">Add repo</button></form>
+  <span class="grow"></span>
+  <label>AWS profile (optional) <input type="text" id="profile" placeholder="default" autocomplete="off" spellcheck="false"></label>
+</header>
+<main>
+  <section class="panel" aria-labelledby="prsTitle">
+    <div class="bar" style="margin-top:0"><h2 id="prsTitle">Open pull requests</h2><span class="grow"></span><button class="btn small" id="refresh">Refresh</button></div>
+    <ul class="prs" id="prs"></ul>
+    <button class="btn primary" id="build" style="width:100%">Build</button>
+  </section>
+  <section class="panel" aria-labelledby="flowTitle">
+    <div id="error" class="msg" role="alert" hidden></div>
+    <h2 id="flowTitle">Pipeline</h2>
+    <div class="flow" id="flow"></div>
+    <div class="bar"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stop" hidden>Stop</button></div>
+    <pre id="log" tabindex="0" aria-labelledby="logTitle"></pre>
+    <p class="sr" aria-live="polite" id="live"></p>
+  </section>
+</main>
+<script>
+const TOKEN = '__TOKEN__';
+const $ = (id) => document.getElementById(id);
+let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {};
+const profile = $('profile');
+try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
+profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
+
+async function post(path, body = {}) {
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) showError(j.error || 'That did not work.');
+  return r.ok;
+}
+function showError(text) { const e = $('error'); e.textContent = text || ''; e.hidden = !text; }
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped' };
+// One drawn set: filled disc + white mark for an outcome, outline ring while waiting, half disc while running.
+const mark = {
+  waiting: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/>',
+  running: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 4a5 5 0 0 1 0 10z" fill="currentColor"/>',
+  passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>',
+  stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="#fff"/>',
+};
+const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
+function took(s) {
+  if (!s.started) return label[s.status];
+  const sec = Math.round(((s.ended || Date.now()) - s.started) / 1000);
+  return `${label[s.status]}, ${sec < 60 ? sec + ' s' : Math.floor(sec / 60) + ' min ' + (sec % 60) + ' s'}`;
+}
+
+function stageCard(s) {
+  return `<button class="stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
+    <span class="top">${icon(s.status)}${esc(s.name)}</span>
+    <span class="time">${took(s)}</span>
+    <span class="steps">${s.steps.map((t) => `<span>${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')}</span>
+  </button>`;
+}
+
+function render() {
+  $('repo').innerHTML = repos.map((r) => `<option value="${esc(r)}" ${state && r === state.repo ? 'selected' : ''}>${esc(r.split('/').pop())}</option>`).join('') || '<option>Add a repo</option>';
+  if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
+  $('envName').textContent = `to ${state.config.environment}`;
+  const busy = !!state.running;
+  showError(state.error);
+
+  $('prs').innerHTML = state.prs.length ? state.prs.map((p) => `<li><label>
+      <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft ? 'checked' : ''} ${busy || p.draft ? 'disabled' : ''}>
+      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
+    </label></li>`).join('') : '<li class="empty">No open pull requests.</li>';
+  const n = [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft)).length;
+  $('build').textContent = `Build ${state.config.branch}` + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
+  $('build').disabled = busy;
+
+  const build = state.stages.filter((s) => s.group === 'build');
+  const deploy = state.stages.filter((s) => s.group === 'deploy');
+  const merged = state.picked.length ? `merges ${state.picked.map((x) => '#' + x).join(', ')} into ${state.config.branch} on GitHub, then deploys.` : `deploys ${state.config.branch} as it is.`;
+  const arrow = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
+  $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
+    <div class="row"><h3>2. Deploy<small>Your click</small></h3><div class="group">
+      <div class="gate"><button class="btn primary" id="deploy" ${state.buildOk && !busy ? '' : 'disabled'}>Deploy to ${esc(state.config.environment)}</button>
+        <p>${state.buildOk ? 'Build passed. This ' + merged : 'Unlocks when every build stage passes.'}</p></div>
+      ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
+  $('stop').hidden = !busy;
+
+  const sel = state.stages.find((s) => s.id === selected) || state.stages[0];
+  $('logTitle').textContent = `Log: ${sel.name}`;
+  const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.textContent = sel.log.join('\n').replace(/^\n+/, '');
+  if (atEnd) log.scrollTop = log.scrollHeight;
+
+  const live = state.stages.map((s) => `${s.name} ${label[s.status]}`).join(', ');
+  if (live !== lastLive) { $('live').textContent = live; lastLive = live; }
+}
+
+new EventSource('/events').onmessage = (e) => {
+  const m = JSON.parse(e.data);
+  if (m.type === 'state') {
+    if (m.repos) repos = m.repos;
+    if (!state && m.state) picked = new Set(m.state.picked); // a new tab shows the batch already built
+    state = m.state; if (state) repos = state.repos;
+    for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
+    if (state?.running) selected = state.running;
+    render();
+  } else if (m.type === 'reset') {
+    logs[m.stage] = [];
+    const s = state?.stages.find((x) => x.id === m.stage); if (s) s.log = logs[m.stage];
+  } else if (m.type === 'log' && state) {
+    (logs[m.stage] ??= []).push(m.line);
+    if (logs[m.stage].length > 4000) logs[m.stage].splice(0, logs[m.stage].length - 4000);
+    if (m.stage === selected) {
+      const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+      log.append((log.textContent ? '\n' : '') + m.line);
+      if (atEnd) log.scrollTop = log.scrollHeight;
+    }
+  }
+};
+setInterval(() => state?.running && render(), 1000); // running timer
+
+$('prs').addEventListener('change', (e) => { const n = Number(e.target.value); e.target.checked ? picked.add(n) : picked.delete(n); render(); });
+$('flow').addEventListener('click', (e) => {
+  if (e.target.closest('#deploy')) {
+    const what = state.picked.length ? `merge PR ${state.picked.map((x) => '#' + x).join(', ')} on GitHub and deploy` : `deploy ${state.config.branch}`;
+    if (confirm(`This will ${what} to ${state.config.environment}. Go?`)) post('/api/deploy');
+    return;
+  }
+  const card = e.target.closest('.stage');
+  if (card) { selected = card.dataset.id; render(); }
+});
+$('build').addEventListener('click', () => { showError(''); post('/api/build', { prs: [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft)), profile: profile.value.trim() }); });
+$('stop').addEventListener('click', () => post('/api/stop'));
+$('refresh').addEventListener('click', () => post('/api/prs'));
+$('repo').addEventListener('change', (e) => { picked.clear(); post('/api/repo', { path: e.target.value }); });
+$('addForm').addEventListener('submit', (e) => { e.preventDefault(); const p = $('addPath').value.trim(); if (p) post('/api/repo', { path: p }).then((ok) => ok && ($('addPath').value = '')); });
+</script>
+</body>
+</html>

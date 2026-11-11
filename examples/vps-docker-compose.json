@@ -1,0 +1,12 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Tests", "run": "docker compose run --rm app npm test" },
+    { "name": "Build images", "run": "docker compose build" }
+  ],
+  "deploy": [
+    { "name": "Restart", "run": "docker compose up -d" },
+    { "name": "Health check", "run": "sleep 5 && curl -fsS http://localhost:3000/health" }
+  ]
+}
