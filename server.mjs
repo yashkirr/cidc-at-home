@@ -16,6 +16,7 @@ const HOME = join(homedir(), '.cicd-at-home');
 const PORT = Number(process.env.PIPELINE_PORT || 4321);
 const TOKEN = randomBytes(24).toString('hex');
 const MAX_LOG = 4000;
+const BOOT = Date.now(); // a page left open from an older server reloads itself when it sees a new one
 mkdirSync(HOME, { recursive: true });
 
 // Repos you added, remembered between runs. The first argument (or the launcher's repo) is added too.
@@ -238,7 +239,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
-      res.write(`data: ${JSON.stringify({ type: 'state', state: view(true), repos })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'state', state: view(true), repos, boot: BOOT })}\n\n`);
       clients.add(res);
       req.on('close', () => clients.delete(res));
       return;

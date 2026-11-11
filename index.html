@@ -112,7 +112,7 @@
 <script>
 const TOKEN = '__TOKEN__';
 const $ = (id) => document.getElementById(id);
-let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [];
+let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [], boot = 0;
 const profile = $('profile');
 try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
 profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
@@ -204,6 +204,8 @@ function draw() {
 new EventSource('/events').onmessage = (e) => {
   const m = JSON.parse(e.data);
   if (m.type === 'state') {
+    // The server was restarted (maybe updated): this page's token and code are stale, so start over.
+    if (m.boot) { if (boot && boot !== m.boot) return location.reload(); boot = m.boot; }
     if (m.repos) repos = m.repos;
     if (!state && m.state) picked = new Set(m.state.picked); // a new tab shows the batch already built
     state = m.state; if (state) repos = state.repos;
