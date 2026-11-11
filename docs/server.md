@@ -62,4 +62,6 @@ See [examples/vps-docker-compose.json](../examples/vps-docker-compose.json) and
 
 - Restarting the app forgets the current run (the page goes back to "Waiting"). The repo list and the private copies
   stay.
-- Only one run at a time. Two people pressing Build at once get "Something is already running".
+- One build and one deploy at a time. A build can run while a deploy does (see
+  [how it works](how-it-works.md#build-the-next-batch-while-one-deploys)); a second Build while one is running gets
+  "A build is already running".

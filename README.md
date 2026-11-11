@@ -7,7 +7,8 @@ It is a small web page that does two things:
 1. **Build** (one click). It takes your main branch, merges in the open pull requests you tick, and runs your
    checks on the result: lint, tests, build, whatever your repo needs. You watch every stage and step pass or fail.
 2. **Deploy** (one click, only after a green build). It merges those pull requests on GitHub, checks that main now
-   has exactly the code that was tested, then runs your deploy steps.
+   has exactly the code that was tested, then runs your deploy steps. While it deploys, you can already build the
+   next batch, stacked on the one going out, so it is ready to deploy the moment this one finishes.
 
 What goes live is always what is on main, and always something that passed your checks.
 

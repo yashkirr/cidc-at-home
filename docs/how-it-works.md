@@ -48,6 +48,21 @@ Then your **deploy stages** run in the same private copy, which now sits on the 
 the build stages (a `dist/` folder, a Terraform plan file) is still there, so deploy stages can ship exactly what was
 built and tested.
 
+## Build the next batch while one deploys
+
+Pressing **Deploy** hands the green batch to the deploy row, and **Build** unlocks again straight away. Pick the next
+pull requests and build them while the deploy runs.
+
+- The next batch is built in a second private copy (`~/.cicd-at-home/work/<repo>-<id>-next`), so it never touches the
+  files the deploy is using. Its ignored caches (`node_modules` and so on) start cold the first time.
+- It is **stacked** on the batch being deployed: `batch.sh` starts from that batch's tested commit (`PIPELINE_BASE`)
+  instead of the branch on GitHub, then merges the new pull requests on top. The ones being deployed are greyed out.
+- Deploys still go one at a time. The next batch's **Deploy** button unlocks when the running deploy finishes.
+- **Merge on GitHub** checks that the branch on GitHub has the same *files* the batch was built on. Once the batch
+  under it is merged, it does, so the stacked batch deploys without a rebuild. If the batch under it did not merge, the
+  page asks you to build again, and the merge stage refuses anyway.
+- **Stop build** and **Stop deploy** stop one without the other.
+
 ## Why merge first, then deploy
 
 Deploying straight from a batch of unmerged pull requests would put code live that main does not have. The next deploy

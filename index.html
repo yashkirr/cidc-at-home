@@ -104,7 +104,7 @@
     <div id="error" class="msg" role="alert" hidden></div>
     <h2 id="flowTitle">Pipeline</h2>
     <div class="flow" id="flow"></div>
-    <div class="bar"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stop" hidden>Stop</button></div>
+    <div class="bar"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
     <pre id="log" tabindex="0" aria-labelledby="logTitle"></pre>
     <p class="sr" aria-live="polite" id="live"></p>
   </section>
@@ -112,7 +112,7 @@
 <script>
 const TOKEN = '__TOKEN__';
 const $ = (id) => document.getElementById(id);
-let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {};
+let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [];
 const profile = $('profile');
 try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
 profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
@@ -163,15 +163,15 @@ function draw() {
   $('build').disabled = $('refresh').disabled = !state;
   if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
   $('envName').textContent = `to ${state.config.environment}`;
-  const busy = !!state.running;
+  const busy = state.building, inDeploy = (n) => state.deployingPrs.includes(n);
   showError(state.error);
 
   $('prs').innerHTML = state.prs.length ? state.prs.map((p) => `<li><label>
-      <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft ? 'checked' : ''} ${busy || p.draft ? 'disabled' : ''}>
-      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
+      <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft && !inDeploy(p.number) ? 'checked' : ''} ${busy || p.draft || inDeploy(p.number) ? 'disabled' : ''}>
+      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? '<span class="tag">deploying</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
     </label></li>`).join('') : '<li class="empty">No open pull requests.</li>';
-  const n = [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft)).length;
-  $('build').textContent = `Build ${state.config.branch}` + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
+  const n = pickable().length;
+  $('build').textContent = (state.deploying ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
   $('build').disabled = busy;
   $('refresh').disabled = false;
 
@@ -179,12 +179,17 @@ function draw() {
   const deploy = state.stages.filter((s) => s.group === 'deploy');
   const merged = state.picked.length ? `merges ${state.picked.map((x) => '#' + x).join(', ')} into ${state.config.branch} on GitHub, then deploys.` : `deploys ${state.config.branch} as it is.`;
   const arrow = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
-  $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
+  const stacked = state.stackedOn ? `, stacked on ${state.stackedOn.length ? state.stackedOn.map((x) => '#' + x).join(', ') : 'the deploy'}` : '';
+  const gate = state.buildOk && state.deploying ? 'Build passed. Unlocks when the deploy that is running finishes.'
+    : state.buildOk ? 'Build passed. This ' + merged
+    : state.deploying && !busy ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
+  $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
     <div class="row"><h3>2. Deploy<small>Your click</small></h3><div class="group">
-      <div class="gate"><button class="btn primary" id="deploy" ${state.buildOk && !busy ? '' : 'disabled'}>Deploy to ${esc(state.config.environment)}</button>
-        <p>${state.buildOk ? 'Build passed. This ' + merged : 'Unlocks when every build stage passes.'}</p></div>
+      <div class="gate"><button class="btn primary" id="deploy" ${state.buildOk && !busy && !state.deploying ? '' : 'disabled'}>Deploy to ${esc(state.config.environment)}</button>
+        <p>${gate}</p></div>
       ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
-  $('stop').hidden = !busy;
+  $('stopBuild').hidden = !busy;
+  $('stopDeploy').hidden = !state.deploying;
 
   const sel = state.stages.find((s) => s.id === selected) || state.stages[0];
   $('logTitle').textContent = `Log: ${sel.name}`;
@@ -203,7 +208,9 @@ new EventSource('/events').onmessage = (e) => {
     if (!state && m.state) picked = new Set(m.state.picked); // a new tab shows the batch already built
     state = m.state; if (state) repos = state.repos;
     for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
-    if (state?.running) selected = state.running;
+    const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id));
+    if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
+    wasRunning = state?.running ?? [];
     render();
   } else if (m.type === 'reset') {
     logs[m.stage] = [];
@@ -220,7 +227,7 @@ new EventSource('/events').onmessage = (e) => {
 };
 // Running timer: only the times change, so leave the rest of the page (and the log) alone.
 setInterval(() => {
-  for (const s of state?.running ? state.stages : []) {
+  for (const s of state?.running.length ? state.stages : []) {
     const t = document.querySelector(`.stage[data-id="${CSS.escape(s.id)}"] .time`);
     if (t) t.textContent = took(s);
   }
@@ -236,8 +243,10 @@ $('flow').addEventListener('click', (e) => {
   const card = e.target.closest('.stage');
   if (card) { selected = card.dataset.id; render(); }
 });
-$('build').addEventListener('click', () => { showError(''); post('/api/build', { prs: [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft)), profile: profile.value.trim() }); });
-$('stop').addEventListener('click', () => post('/api/stop'));
+const pickable = () => [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft) && !state.deployingPrs.includes(x));
+$('build').addEventListener('click', () => { showError(''); post('/api/build', { prs: pickable(), profile: profile.value.trim() }); });
+$('stopBuild').addEventListener('click', () => post('/api/stop', { lane: 'build' }));
+$('stopDeploy').addEventListener('click', () => post('/api/stop', { lane: 'deploy' }));
 $('refresh').addEventListener('click', () => post('/api/prs'));
 $('repo').addEventListener('change', (e) => { picked.clear(); post('/api/repo', { path: e.target.value }); });
 $('addForm').addEventListener('submit', (e) => { e.preventDefault(); const p = $('addPath').value.trim(); if (p) post('/api/repo', { path: p }).then((ok) => ok && ($('addPath').value = '')); });
