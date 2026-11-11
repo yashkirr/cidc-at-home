@@ -117,6 +117,13 @@ esac
     assert.equal(state.stackedOn, 5);
     writeFileSync(join(tmp, 'checkgate'), '');
     await until((s) => s.live?.number === 5 && s.build.number === 6 && s.buildOk, 'build #5 live, #6 green');
+
+    // All builds, newest first, with where each one is now; any build from this run of the app has its logs.
+    assert.deepEqual(state.builds.map((b) => [b.number, b.status]), [[6, 'good'], [5, 'live'], [4, 'replaced'], [3, 'replaced'], [2, 'replaced'], [1, 'bad']]);
+    assert.deepEqual(state.builds.find((b) => b.number === 3).prs.map((p) => p.number), [2]);
+    const old = await (await post('/api/build-log', { number: 3 })).json();
+    assert.match(old.stages.find((s) => s.id === 'deploy0').log.join('\n'), /== Upload/);
+    assert.equal(JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json')).builds.length, 6, 'saved for after a restart');
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();

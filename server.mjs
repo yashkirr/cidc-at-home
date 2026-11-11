@@ -62,7 +62,7 @@ const makeStages = (config) => [
   ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
 const newRun = (work, picked = [], buildEnv = {}, under = null, number = null) => ({
-  number, work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, bad: null,
+  number, at: Date.now(), work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, bad: null,
   prs: picked.map((n) => ({ number: n, title: state.prs.find((p) => p.number === n)?.title ?? '' })), stages: makeStages(state.config),
 });
 
@@ -82,6 +82,15 @@ function status(r) {
   if (state.queue.includes(r)) return 'queued';
   return r.buildOk ? 'good' : r.stages.some((s) => s.status === 'running') ? 'building' : 'new';
 }
+// Every build there has been, newest first: this run's builds from memory, older ones as saved. Where a build is
+// (queued, deploying, live, replaced...) comes from the live runs; a build in flight when the app stopped is 'stopped'.
+function history() {
+  const live = state.record.live[state.config.environment]?.number;
+  const all = new Map((state.record.builds ?? []).map((b) => [b.number, b]));
+  for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, status: status(r), deployedSha: r.deployedSha ?? null });
+  return [...all.values()].map((b) => (b.status === 'live' && b.number !== live ? { ...b, status: 'replaced' } : b))
+    .sort((a, b) => b.number - a.number).slice(0, 200); // shortcut: last 200 builds only, page it if you need more
+}
 const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad, building: r.stages.some((s) => s.group === 'build' && s.status === 'running') };
 
 function openRepo(dir) {
@@ -91,7 +100,8 @@ function openRepo(dir) {
   const work = join(HOME, 'work', id), recordFile = join(HOME, `builds-${id}.json`);
   // Build numbers and what is live, kept between runs of the app.
   const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : { next: 1, live: {} };
-  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile };
+  record.builds = (record.builds ?? []).map((b) => (['new', 'building', 'good', 'queued', 'deploying'].includes(b.status) ? { ...b, status: 'stopped' } : b));
+  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, runs: new Map(), saved: '' };
   state.build = newRun(work);
   send({ type: 'state', state: view() });
 }
@@ -102,7 +112,10 @@ function view(withLogs = false) {
   if (!state) return null;
   const b = state.build, dep = deploying(), d = dep ?? (b.buildOk && !state.queue.length ? b : state.deploy ?? b);
   const stages = [...b.stages.filter((s) => s.group === 'build'), ...d.stages.filter((s) => s.group === 'deploy')];
+  const builds = history(), saved = JSON.stringify(builds);
+  if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
+    builds,
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
@@ -203,6 +216,7 @@ async function build(picked, env) {
   if (!work) throw new Error('Too many builds waiting. Let some deploy first.');
   ensureWorktree(work);
   const run = state.build = newRun(work, picked, env, under, state.record.next++);
+  state.runs.set(run.number, run);
   saveRecord();
   state.error = null;
   send({ type: 'state', state: view(true) });
@@ -257,6 +271,7 @@ async function deploy(run) {
     run.done = true;
     if (run.stages.every((s) => s.group !== 'deploy' || s.status === 'passed')) {
       run.live = true;
+      run.deployedSha = git(run.work, 'rev-parse', 'HEAD'); // main's commit after the merge: what a rollback redeploys
       state.record.live[state.config.environment] = { number: run.number, prs: run.prs, at: Date.now() };
       saveRecord();
     } else if (state.queue.length) {
@@ -319,6 +334,12 @@ const server = http.createServer(async (req, res) => {
         pump();
         send({ type: 'state', state: view() });
         break;
+      }
+      case '/api/build-log': {
+        // Stages and logs of any build from this run of the app (the pipeline only shows the newest).
+        const r = state?.runs.get(Number(b.number));
+        if (!r) throw new Error('Logs are only kept while the app runs. This build is from before a restart.');
+        return json(res, 200, { number: r.number, stages: r.stages.map(({ env, run, ...s }) => s) });
       }
       case '/api/queue':
         // remove: only the last build in the queue, since the ones behind a build are stacked on it. resume: after a failed deploy.

@@ -67,6 +67,9 @@ pull requests and build them while the deploy runs.
 - You don't have to wait for checks. Once a build's **Batch PRs** stage passes, **Build** unlocks again: the running
   build moves into the queue, and the new one is stacked on it. If the build in front then fails its checks, every
   build stacked on it is marked bad. Up to 10 builds can be in flight, one worktree each.
+- **All builds** (bottom of the page) lists every build, newest first: its PRs, when it was built, and where it is now
+  (building, bad, queued, deploying, live, was live, deploy failed). Click one to see its stages, and click a stage for
+  its log. Logs are kept while the app runs; the list itself is saved with the build numbers.
 - **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
 - If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
   stacked on it is marked bad and dropped, because it was built on code main does not have.

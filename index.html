@@ -95,6 +95,19 @@
   .bar h2 { margin: 0; }
   pre { margin: 0; background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 12px; height: 46vh; overflow: auto; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 12%, transparent); color: var(--text); border: 1px solid var(--fail); }
+  .history { list-style: none; margin: 0; padding: 0; display: grid; }
+  .history > li { border-top: 1px solid var(--line); }
+  .history > li:first-child { border-top: 0; }
+  .hrow { width: 100%; display: grid; grid-template-columns: 64px 128px 1fr auto; gap: 12px; align-items: center; text-align: left; background: none; border: 0; padding: 10px 6px; cursor: pointer; border-radius: 8px; min-height: 44px; }
+  @media (hover: hover) { .hrow:hover { background: var(--bg); } }
+  .hrow b { font-variant-numeric: tabular-nums; }
+  .hrow .what { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+  .hrow time { color: var(--muted); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .hdetail { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 6px 12px 82px; }
+  .hdetail .btn { min-height: 32px; padding: 0 10px; font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+  @media (max-width: 700px) { .hrow { grid-template-columns: 48px 1fr; } .hrow .what, .hrow time { grid-column: 2; } .hdetail { padding-left: 6px; } }
+  .chip.queued, .chip.building, .chip.deploying { background: color-mix(in srgb, var(--run) 16%, transparent); }
+  .chip.live, .chip.good { background: color-mix(in srgb, var(--pass) 16%, transparent); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -122,10 +135,15 @@
     <pre id="log" tabindex="0" aria-labelledby="logTitle"></pre>
     <p class="sr" aria-live="polite" id="live"></p>
   </section>
+  <section class="panel full" aria-labelledby="buildsTitle">
+    <h2 id="buildsTitle">All builds</h2>
+    <ol class="history" id="history"></ol>
+  </section>
 </main>
 <script>
 const TOKEN = '__TOKEN__';
 const $ = (id) => document.getElementById(id);
+let viewing = null, openBuild = null, buildStages = []; // an older build's log shown in the Log panel
 let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [], boot = 0;
 const profile = $('profile');
 try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
@@ -232,8 +250,9 @@ function draw() {
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
 
-  const sel = state.stages.find((s) => s.id === selected) || state.stages[0];
-  $('logTitle').textContent = `Log: ${sel.name}`;
+  drawHistory();
+  const sel = viewing ?? state.stages.find((s) => s.id === selected) ?? state.stages[0];
+  $('logTitle').textContent = viewing ? `Log: Build #${viewing.number} · ${sel.name}` : `Log: ${sel.name}`;
   const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   log.textContent = sel.log.join('\n').replace(/^\n+/, '');
   if (atEnd) log.scrollTop = log.scrollHeight;
@@ -241,6 +260,32 @@ function draw() {
   const live = state.stages.map((s) => `${s.name} ${label[s.status]}`).join(', ');
   if (live !== lastLive) { $('live').textContent = live; lastLive = live; }
 }
+
+// All builds: where each one is now, what is in it, and (for builds from this run of the app) its stages and logs.
+const where = { new: 'Waiting', building: 'Building', good: 'Green, not queued', bad: 'Bad', queued: 'Queued', deploying: 'Deploying', live: 'Live', replaced: 'Was live', failed: 'Deploy failed', stopped: 'Stopped (app restarted)' };
+function drawHistory() {
+  const env = esc(state.config.environment);
+  $('history').innerHTML = state.builds.length ? state.builds.map((b) => `<li>
+      <button class="hrow" data-build="${b.number}" aria-expanded="${openBuild === b.number}">
+        <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + env : where[b.status] ?? b.status}</span></span>
+        <span class="what">${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
+        <time>${new Date(b.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
+      </button>
+      ${openBuild === b.number ? `<div class="hdetail">${buildStages.length ? buildStages.map((s) => `<button class="btn" data-log="${s.id}">${icon(s.status)}${esc(s.name)}</button>`).join('') : '<span class="none">Logs are only kept while the app runs.</span>'}</div>` : ''}
+    </li>`).join('') : '<li class="empty">No builds yet.</li>';
+}
+$('history').addEventListener('click', async (e) => {
+  const lg = e.target.closest('[data-log]');
+  if (lg) { const s = buildStages.find((x) => x.id === lg.dataset.log); viewing = { ...s, number: openBuild }; render(); $('log').scrollIntoView({ block: 'nearest' }); return; }
+  const row = e.target.closest('[data-build]');
+  if (!row) return;
+  const n = Number(row.dataset.build);
+  if (openBuild === n) { openBuild = null; render(); return; }
+  openBuild = n; buildStages = [];
+  const r = await fetch('/api/build-log', { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify({ number: n }) });
+  if (r.ok) buildStages = (await r.json()).stages;
+  render();
+});
 
 new EventSource('/events').onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -261,7 +306,7 @@ new EventSource('/events').onmessage = (e) => {
   } else if (m.type === 'log' && state) {
     (logs[m.stage] ??= []).push(m.line);
     if (logs[m.stage].length > 4000) logs[m.stage].splice(0, logs[m.stage].length - 4000);
-    if (m.stage === selected) {
+    if (m.stage === selected && !viewing) {
       const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
       log.append((log.textContent ? '\n' : '') + m.line);
       if (atEnd) log.scrollTop = log.scrollHeight;
@@ -288,7 +333,7 @@ $('flow').addEventListener('click', (e) => {
   if (rm) return post('/api/queue', { action: 'remove', number: Number(rm.dataset.remove) });
   if (e.target.closest('#resume')) return post('/api/queue', { action: 'resume' });
   const card = e.target.closest('.stage');
-  if (card) { selected = card.dataset.id; render(); }
+  if (card) { selected = card.dataset.id; viewing = null; render(); }
 });
 const pickable = () => [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft) && !state.deployingPrs.includes(x));
 $('build').addEventListener('click', () => { showError(''); post('/api/build', { prs: pickable(), profile: profile.value.trim() }); });
