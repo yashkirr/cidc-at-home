@@ -58,10 +58,15 @@ pull requests and build them while the deploy runs.
   files the deploy is using. Its ignored caches (`node_modules` and so on) start cold the first time.
 - It is **stacked** on the batch being deployed: `batch.sh` starts from that batch's tested commit (`PIPELINE_BASE`)
   instead of the branch on GitHub, then merges the new pull requests on top. The ones being deployed are greyed out.
-- Deploys still go one at a time. While one runs, the next batch's button says **Queue deploy**. Press it while the
-  batch is still building or once it is green: it deploys on its own as soon as it is green and the deploy in front has
-  finished. **Take off queue** undoes it. If the deploy in front fails or is stopped, the queue is cleared, so nothing
-  goes out on top of a broken deploy without you looking first.
+- Every batch is a numbered **build** (Build #1, #2, ...). The **Builds** box on the page shows the build live in
+  the environment and its PRs, the build deploying now, and the queue behind it. Numbers and the live build are kept
+  in `~/.cicd-at-home/builds-<repo>-<id>.json`, so they survive a restart.
+- Deploys go one at a time. While one runs, Deploy says **Queue deploy**. Press it while the build is still running
+  or once it is green. Queued builds deploy on their own, oldest first, each once it is green. The queue can hold
+  several builds (each in its own worktree, up to 10 in flight), each stacked on the one in front of it.
+- **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
+- If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
+  stacked on it is marked bad and dropped, because it was built on code main does not have.
 - **Merge on GitHub** checks that the branch on GitHub has the same *files* the batch was built on. Once the batch
   under it is merged, it does, so the stacked batch deploys without a rebuild. If the batch under it did not merge, the
   page asks you to build again, and the merge stage refuses anyway.

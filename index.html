@@ -83,6 +83,11 @@
   .bar h2 { margin: 0; }
   pre { margin: 0; background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 12px; height: 46vh; overflow: auto; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 12%, transparent); color: var(--text); border: 1px solid var(--fail); }
+  .builds { display: grid; gap: 8px; margin: 0 0 18px; }
+  .build { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+  .build b { white-space: nowrap; }
+  .build .what { flex: 1; min-width: 180px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+  .build.live { border-color: var(--pass); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -102,6 +107,8 @@
   </section>
   <section class="panel" aria-labelledby="flowTitle">
     <div id="error" class="msg" role="alert" hidden></div>
+    <h2 id="buildsTitle">Builds</h2>
+    <div class="builds" id="builds" aria-labelledby="buildsTitle"></div>
     <h2 id="flowTitle">Pipeline</h2>
     <div class="flow" id="flow"></div>
     <div class="bar"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
@@ -164,11 +171,12 @@ function draw() {
   if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
   $('envName').textContent = `to ${state.config.environment}`;
   const busy = state.building, inDeploy = (n) => state.deployingPrs.includes(n);
+  const inBuild = (n) => [state.deployingBuild, ...state.queue].find((b) => b?.prs.some((p) => p.number === n));
   showError(state.error);
 
   $('prs').innerHTML = state.prs.length ? state.prs.map((p) => `<li><label>
       <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft && !inDeploy(p.number) ? 'checked' : ''} ${busy || p.draft || inDeploy(p.number) ? 'disabled' : ''}>
-      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? '<span class="tag">deploying</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
+      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? `<span class="tag">in build #${inBuild(p.number)?.number}</span>` : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
     </label></li>`).join('') : '<li class="empty">No open pull requests.</li>';
   const n = pickable().length;
   $('build').textContent = (state.deploying ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
@@ -179,19 +187,21 @@ function draw() {
   const deploy = state.stages.filter((s) => s.group === 'deploy');
   const merged = state.picked.length ? `merges ${state.picked.map((x) => '#' + x).join(', ')} into ${state.config.branch} on GitHub, then deploys.` : `deploys ${state.config.branch} as it is.`;
   const arrow = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
-  const stacked = state.stackedOn ? `, stacked on ${state.stackedOn.length ? state.stackedOn.map((x) => '#' + x).join(', ') : 'the deploy'}` : '';
-  const queue = !(state.buildOk && !state.deploying);
-  const gate = state.queued ? `Queued. Deploys on its own once ${busy ? 'the build passes' : ''}${busy && state.deploying ? ' and ' : ''}${state.deploying ? 'the deploy in front finishes' : ''}.`
-    : state.buildOk && state.deploying ? 'Build passed. Queue it to deploy once the running deploy finishes.'
-    : busy ? 'Queue it now to deploy as soon as the build passes.'
-    : state.buildOk ? 'Build passed. This ' + merged
-    : state.deploying && !busy ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
-  $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
-    <div class="row"><h3>2. Deploy<small>Your click</small></h3><div class="group">
-      <div class="gate">${state.queued ? '<button class="btn" id="unqueue">Take off queue</button>'
-        : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'} to ${esc(state.config.environment)}</button>`}
+  const num = state.build.number, stacked = state.stackedOn ? `, on build #${state.stackedOn}` : '';
+  const queue = !(state.buildOk && !state.deploying && !state.queue.length);
+  const place = state.queue.findIndex((b) => b.number === num) + 1;
+  const gate = state.queued ? `Build #${num} is number ${place} in the queue. It deploys on its own${busy ? ' once it passes' : ''}${place > 1 || state.deploying ? ', after the builds in front' : ''}.`
+    : state.build.bad ? esc(state.build.bad)
+    : state.buildOk && queue ? `Build #${num} passed. Queue it to deploy after the builds in front.`
+    : busy ? `Queue build #${num} now to deploy as soon as it passes.`
+    : state.buildOk ? `Build #${num} passed. This ` + merged
+    : state.deploying ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
+  $('flow').innerHTML = `<div class="row"><h3>1. Build${num ? ' #' + num : ''}<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
+    <div class="row"><h3>2. Deploy<small>${state.deployRow ? 'Build #' + state.deployRow : 'Your click'}</small></h3><div class="group">
+      <div class="gate">${state.queued ? '' : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'} to ${esc(state.config.environment)}</button>`}
         <p>${gate}</p></div>
       ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
+  drawBuilds();
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
 
@@ -204,6 +214,27 @@ function draw() {
   const live = state.stages.map((s) => `${s.name} ${label[s.status]}`).join(', ');
   if (live !== lastLive) { $('live').textContent = live; lastLive = live; }
 }
+
+// Builds panel: what is live in the environment, what is deploying, and the queue waiting behind it.
+const statusText = { new: 'Waiting', building: 'Building', good: 'Green', bad: 'Bad', queued: 'Queued', deploying: 'Deploying', live: 'Live', failed: 'Deploy failed' };
+const prList = (prs) => prs.length ? prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`;
+const buildRow = (b, label, extra = '') => `<div class="build ${b.status}"><b>${label} · Build #${b.number}</b><span class="what">${prList(b.prs)}</span>${extra}</div>`;
+function drawBuilds() {
+  const env = esc(state.config.environment), l = state.live;
+  const q = state.queue.map((b, i) => {
+    const st = b.status === 'queued' && state.build.number === b.number && state.building ? 'Building' : b.status === 'queued' ? 'Green' : statusText[b.status];
+    return buildRow(b, `Queue ${i + 1}`, `<span class="tag">${st}</span>` + (i === state.queue.length - 1 ? `<button class="btn small" data-remove="${b.number}">Take off queue</button>` : ''));
+  });
+  $('builds').innerHTML = (l ? buildRow({ ...l, status: 'live' }, `Live in ${env}`, `<span class="tag">${new Date(l.at).toLocaleString()}</span>`) : `<p class="empty">Nothing deployed to ${env} yet.</p>`)
+    + (state.deployingBuild ? buildRow(state.deployingBuild, 'Deploying now') : '')
+    + (state.paused ? `<div class="msg">Queue paused after a failed deploy. <button class="btn small" id="resume">Resume queue</button></div>` : '')
+    + (q.join('') || '<p class="empty">Queue empty.</p>');
+}
+$('builds').addEventListener('click', (e) => {
+  const rm = e.target.closest('[data-remove]');
+  if (rm) post('/api/queue', { action: 'remove', number: Number(rm.dataset.remove) });
+  if (e.target.closest('#resume')) post('/api/queue', { action: 'resume' });
+});
 
 new EventSource('/events').onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -245,10 +276,6 @@ $('flow').addEventListener('click', (e) => {
     const what = state.picked.length ? `merge PR ${state.picked.map((x) => '#' + x).join(', ')} on GitHub and deploy` : `deploy ${state.config.branch}`;
     const when = state.buildOk && !state.deploying ? '' : ' once it is ready';
     if (confirm(`This will ${what} to ${state.config.environment}${when}. Go?`)) post('/api/deploy');
-    return;
-  }
-  if (e.target.closest('#unqueue')) {
-    post('/api/deploy', { queue: false });
     return;
   }
   const card = e.target.closest('.stage');
