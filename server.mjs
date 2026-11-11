@@ -87,7 +87,7 @@ function status(r) {
 function history() {
   const live = state.record.live[state.config.environment]?.number;
   const all = new Map((state.record.builds ?? []).map((b) => [b.number, b]));
-  for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, status: status(r), deployedSha: r.deployedSha ?? null });
+  for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, status: status(r), deployedSha: r.deployedSha ?? null, rollbackOf: r.rollbackOf ?? null });
   return [...all.values()].map((b) => (b.status === 'live' && b.number !== live ? { ...b, status: 'replaced' } : b))
     .sort((a, b) => b.number - a.number).slice(0, 200); // shortcut: last 200 builds only, page it if you need more
 }
@@ -211,10 +211,7 @@ function ensureWorktree(work) {
 async function build(picked, env) {
   if (building() && !state.queue.includes(state.build)) state.queue.push(state.build);
   const under = inFlight().at(-1) ?? null;
-  const used = inFlight().map((r) => r.work);
-  const work = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i === 0 ? state.work : i === 1 ? `${state.work}-next` : `${state.work}-${i + 1}`)).find((w) => !used.includes(w));
-  if (!work) throw new Error('Too many builds waiting. Let some deploy first.');
-  ensureWorktree(work);
+  const work = freeWork();
   const run = state.build = newRun(work, picked, env, under, state.record.next++);
   state.runs.set(run.number, run);
   saveRecord();
@@ -240,6 +237,45 @@ function refreshStagesFromBatch(run) {
   state.config = { ...readConfig(run.work), branch: state.config.branch };
   const [batch] = run.stages;
   run.stages = [batch, ...makeStages(state.config).slice(1)];
+}
+
+// A worktree no build in flight is using. Up to 10, one per build.
+function freeWork() {
+  const used = [...inFlight(), ...(building() ? [state.build] : [])].map((r) => r.work);
+  const work = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i === 0 ? state.work : i === 1 ? `${state.work}-next` : `${state.work}-${i + 1}`)).find((w) => !used.includes(w));
+  if (!work) throw new Error('Too many builds waiting. Let some deploy first.');
+  ensureWorktree(work);
+  return work;
+}
+
+// Rollback: rebuild the commit an earlier build deployed (main as it was then) and run only the deploy stages.
+// Main on GitHub is not touched, so it is now ahead of what is live: the queue pauses, so the next deploy does not
+// ship the bad change again. Revert it on GitHub, then resume the queue. It is a build of its own, "rollback to #N".
+async function rollback(to, env) {
+  const target = history().find((b) => b.number === to);
+  const run = newRun(freeWork(), [], env, null, state.record.next++);
+  Object.assign(run, { prs: target.prs, rollbackOf: to });
+  state.runs.set(run.number, run);
+  state.deploy = run; // the deploy lane: nothing else deploys meanwhile
+  state.paused = true;
+  state.error = null;
+  send({ type: 'state', state: view(true) });
+  try {
+    let ok = await runStage(run, run.stages[0], [], { ...env, PIPELINE_BASE: target.deployedSha, PIPELINE_ROLLBACK: String(to) });
+    if (ok) refreshStagesFromBatch(run); // that commit's own stages
+    run.stages = run.stages.filter((s) => s.id !== 'merge');
+    send({ type: 'state', state: view(true) });
+    for (const s of run.stages.slice(1)) if (ok && !(ok = await runStage(run, s, [], env))) break;
+  } finally {
+    run.done = true;
+    if (run.stages.every((s) => s.status === 'passed')) {
+      Object.assign(run, { live: true, deployedSha: target.deployedSha });
+      state.record.live[state.config.environment] = { number: run.number, prs: run.prs, at: Date.now(), rollbackOf: to };
+      saveRecord();
+      state.error = `Rolled back to build #${to}. Main on GitHub is still ahead of what is live, so the queue is paused. Revert the bad change on GitHub, then resume the queue.`;
+    } else state.error = `The rollback to build #${to} did not finish. Check its log.`;
+    send({ type: 'state', state: view(true) });
+  }
 }
 
 // A build that will never be deployed takes every build stacked on it down with it.
@@ -283,6 +319,14 @@ async function deploy(run) {
     loadPrs().catch(() => {}); // merged PRs drop off the list
     pump();
   }
+}
+
+// Checks that can fail fast happen before the response; the rollback itself runs on.
+async function rollbackStart(to, env) {
+  const target = history().find((b) => b.number === to);
+  if (!target?.deployedSha) throw new Error(`Build #${to} was never live, so there is nothing to roll back to.`);
+  if (deploying()) throw new Error('Wait for the deploy that is running to finish.');
+  rollback(to, env).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
 }
 
 // HTTP. Only this machine, only this page: Host must be ours, and every POST carries the page's secret token.
@@ -341,6 +385,10 @@ const server = http.createServer(async (req, res) => {
         if (!r) throw new Error('Logs are only kept while the app runs. This build is from before a restart.');
         return json(res, 200, { number: r.number, stages: r.stages.map(({ env, run, ...s }) => s) });
       }
+      case '/api/rollback':
+        if (!state) throw new Error('Add a repo first.');
+        await rollbackStart(Number(b.number), profileEnv(b.profile));
+        break;
       case '/api/queue':
         // remove: only the last build in the queue, since the ones behind a build are stacked on it. resume: after a failed deploy.
         if (b.action === 'remove' && state?.queue.at(-1)?.number === b.number) drop(state.queue.at(-1), 'came off the queue');

@@ -124,6 +124,21 @@ esac
     const old = await (await post('/api/build-log', { number: 3 })).json();
     assert.match(old.stages.find((s) => s.id === 'deploy0').log.join('\n'), /== Upload/);
     assert.equal(JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json')).builds.length, 6, 'saved for after a restart');
+
+    // Rollback to build #2 (main with PR 1 only): rebuilds the commit #2 deployed and runs the deploy stages, as build
+    // #7. Main on GitHub stays as it is, and the queue pauses so the next deploy does not ship PR 2 again by itself.
+    const main = sh(tmp, 'git --git-dir=remote.git rev-parse main');
+    assert.equal((await post('/api/rollback', { number: 6 })).status, 400, 'build #6 was never live');
+    assert.equal((await post('/api/rollback', { number: 2 })).status, 200);
+    await until((s) => s.live?.number === 7 && !s.deploying, 'rolled back to #2 as build #7');
+    assert.equal(state.live.rollbackOf, 2);
+    assert.equal(state.paused, true);
+    assert.equal(sh(tmp, 'git --git-dir=remote.git rev-parse main'), main, 'main untouched');
+    assert.equal(sh(state.deployWork, 'git rev-parse HEAD').trim(), state.builds.find((b) => b.number === 2).deployedSha);
+    assert.equal(sh(state.deployWork, 'test -f pr.txt && ! test -f pr2.txt && echo ok').trim(), 'ok', 'PR 1 is in what was deployed, PR 2 is not');
+    const rb = await (await post('/api/build-log', { number: 7 })).json();
+    assert.deepEqual(rb.stages.map((s) => [s.name, s.status]), [['Batch PRs', 'passed'], ['Checks', 'passed'], ['Release', 'passed']], 'no merge on GitHub in a rollback');
+    assert.deepEqual(state.builds.slice(0, 3).map((b) => [b.number, b.status]), [[7, 'live'], [6, 'good'], [5, 'replaced']]);
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
