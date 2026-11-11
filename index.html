@@ -8,7 +8,7 @@
   :root {
     --bg: #f6f6f4; --panel: #ffffff; --line: #e2e2dd; --text: #18181a; --muted: #67676d;
     --accent: #c8102e; --accent-text: #ffffff;
-    --run: #1f6feb; --pass: #1a7f37; --fail: #c8102e; --stop: #9a6700; --wait: #a3a3a8;
+    --run: #1f6feb; --pass: #1a7f37; --fail: #c8102e; --stop: #9a6700; --wait: #8a8a90; --mark: #ffffff;
     --log-bg: #111113; --log-text: #e6e6e8;
     --ease: cubic-bezier(0.22, 1, 0.36, 1);
     color-scheme: light;
@@ -16,7 +16,7 @@
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f0f11; --panel: #18181b; --line: #2a2a2f; --text: #ededf0; --muted: #9a9aa2;
-      --accent: #c91d2f; --run: #4c8dff; --pass: #3fb950; --fail: #ff6b6b; --stop: #d4a72c; --wait: #5b5b63;
+      --accent: #c91d2f; --run: #4c8dff; --pass: #3fb950; --fail: #ff6b6b; --stop: #d4a72c; --wait: #6e6e76; --mark: #0f0f11;
       --log-bg: #09090b; color-scheme: dark;
     }
   }
@@ -31,8 +31,12 @@
   select, input[type=text] { min-height: 40px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
   input[type=text] { width: 160px; }
   .grow { flex: 1; }
+  .add { display: flex; gap: 8px; }
+  .bar.first { margin-top: 0; }
+  .wide { width: 100%; }
   .btn { min-height: 44px; padding: 0 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; font-weight: 600;
-         transition: transform 150ms var(--ease), opacity 150ms var(--ease); }
+         transition: transform 150ms var(--ease), opacity 150ms var(--ease), border-color 150ms var(--ease), background-color 150ms var(--ease); }
+  @media (hover: hover) { .btn:hover:not(:disabled), .stage:hover { border-color: var(--muted); } .btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--text)); } }
   .btn:active:not(:disabled) { transform: scale(0.97); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
@@ -58,9 +62,9 @@
   .group { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
   @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 6px; } .row > h3 { margin: 0; } .group { flex-direction: column; } .stage, .gate { width: 100% !important; } .group .arrow { display: none; } }
   .stage { width: 196px; flex: none; text-align: left; display: flex; flex-direction: column; justify-content: flex-start; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; cursor: pointer;
-           transition: transform 150ms var(--ease); }
+           transition: transform 150ms var(--ease), border-color 150ms var(--ease); }
   .stage:active { transform: scale(0.98); }
-  .stage[aria-pressed=true] { border-color: var(--text); }
+  .stage[aria-pressed=true] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
   .stage .top { display: flex; gap: 8px; align-items: center; font-weight: 600; }
   .stage .time { display: block; color: var(--muted); font-size: 13px; margin: 2px 0 6px 26px; }
   .steps { margin: 0; padding: 0 0 0 26px; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
@@ -86,15 +90,15 @@
 <header>
   <h1>CI/CD at home <span id="envName"></span></h1>
   <label>Repo <select id="repo" aria-label="Repo"></select></label>
-  <form id="addForm" style="display:flex;gap:8px"><input type="text" id="addPath" placeholder="/path/to/repo" aria-label="Add a repo folder"><button class="btn small">Add repo</button></form>
+  <form id="addForm" class="add"><input type="text" id="addPath" placeholder="/path/to/repo" aria-label="Add a repo folder"><button class="btn small">Add repo</button></form>
   <span class="grow"></span>
   <label>AWS profile (optional) <input type="text" id="profile" placeholder="default" autocomplete="off" spellcheck="false"></label>
 </header>
 <main>
   <section class="panel" aria-labelledby="prsTitle">
-    <div class="bar" style="margin-top:0"><h2 id="prsTitle">Open pull requests</h2><span class="grow"></span><button class="btn small" id="refresh">Refresh</button></div>
+    <div class="bar first"><h2 id="prsTitle">Open pull requests</h2><span class="grow"></span><button class="btn small" id="refresh">Refresh</button></div>
     <ul class="prs" id="prs"></ul>
-    <button class="btn primary" id="build" style="width:100%">Build</button>
+    <button class="btn primary wide" id="build">Build</button>
   </section>
   <section class="panel" aria-labelledby="flowTitle">
     <div id="error" class="msg" role="alert" hidden></div>
@@ -127,9 +131,9 @@ const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed
 const mark = {
   waiting: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/>',
   running: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 4a5 5 0 0 1 0 10z" fill="currentColor"/>',
-  passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
-  failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>',
-  stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="#fff"/>',
+  passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="var(--mark)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="var(--mark)" stroke-width="2" stroke-linecap="round"/>',
+  stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="var(--mark)"/>',
 };
 const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
 function took(s) {
@@ -146,8 +150,17 @@ function stageCard(s) {
   </button>`;
 }
 
+// Redrawing replaces the PR list and stage cards, so put keyboard focus back where it was.
 function render() {
+  const f = document.activeElement;
+  const key = f?.id ? '#' + f.id : f?.dataset?.id ? `.stage[data-id="${CSS.escape(f.dataset.id)}"]` : f?.type === 'checkbox' ? `#prs input[value="${f.value}"]` : null;
+  draw();
+  if (key && document.activeElement !== f) document.querySelector(key)?.focus();
+}
+
+function draw() {
   $('repo').innerHTML = repos.map((r) => `<option value="${esc(r)}" ${state && r === state.repo ? 'selected' : ''}>${esc(r.split('/').pop())}</option>`).join('') || '<option>Add a repo</option>';
+  $('build').disabled = $('refresh').disabled = !state;
   if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
   $('envName').textContent = `to ${state.config.environment}`;
   const busy = state.building, inDeploy = (n) => state.deployingPrs.includes(n);
@@ -160,6 +173,7 @@ function render() {
   const n = pickable().length;
   $('build').textContent = (state.deploying ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
   $('build').disabled = busy;
+  $('refresh').disabled = false;
 
   const build = state.stages.filter((s) => s.group === 'build');
   const deploy = state.stages.filter((s) => s.group === 'deploy');
@@ -211,7 +225,13 @@ new EventSource('/events').onmessage = (e) => {
     }
   }
 };
-setInterval(() => state?.running.length && render(), 1000); // running timer
+// Running timer: only the times change, so leave the rest of the page (and the log) alone.
+setInterval(() => {
+  for (const s of state?.running.length ? state.stages : []) {
+    const t = document.querySelector(`.stage[data-id="${CSS.escape(s.id)}"] .time`);
+    if (t) t.textContent = took(s);
+  }
+}, 1000);
 
 $('prs').addEventListener('change', (e) => { const n = Number(e.target.value); e.target.checked ? picked.add(n) : picked.delete(n); render(); });
 $('flow').addEventListener('click', (e) => {

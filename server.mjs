@@ -244,6 +244,7 @@ const server = http.createServer(async (req, res) => {
       case '/api/repo': openRepo(addRepo(String(b.path))); await loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`)); break;
       case '/api/prs': await loadPrs(); break;
       case '/api/build': {
+        if (!state) throw new Error('Add a repo first.');
         if (building()) throw new Error('A build is already running.');
         const picked = (b.prs ?? []).map(Number);
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
