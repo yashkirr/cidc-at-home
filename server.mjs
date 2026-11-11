@@ -47,8 +47,9 @@ export function readConfig(dir) {
 }
 
 // One pipeline state for the open repo. Stages: batch, build stages, (gate), merge, deploy stages.
-// Two lanes, so the next batch can build while the last one deploys: state.build is the newest batch, state.deploy
-// the batch handed to Deploy. Each lane works in its own worktree. Deploys still go one at a time.
+// Every batch is a numbered build. state.build is the newest one; state.queue holds green (or still building) builds
+// waiting to deploy, oldest first; state.deploy is the one deploying (or the last one that did). Each build in flight
+// has its own worktree and is stacked on the one in front of it, so they can deploy one after another without rebuilds.
 let state = null;
 const clients = new Set();
 const send = (msg) => { const data = `data: ${JSON.stringify(msg)}\n\n`; for (const c of clients) c.write(data); };
@@ -60,33 +61,52 @@ const makeStages = (config) => [
   { id: 'merge', group: 'deploy', name: 'Merge on GitHub', run: `bash "${join(HERE, 'merge.sh')}"` },
   ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
-const newRun = (work, picked = [], buildEnv = {}, under = null) =>
-  ({ work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, mergeFailed: false, stages: makeStages(state.config) });
+const newRun = (work, picked = [], buildEnv = {}, under = null, number = null) => ({
+  number, work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, bad: null,
+  prs: picked.map((n) => ({ number: n, title: state.prs.find((p) => p.number === n)?.title ?? '' })), stages: makeStages(state.config),
+});
 
 const deploying = () => (state?.deploy && !state.deploy.done ? state.deploy : null);
 const building = () => !!state && state.build !== deploying() && !!state.build.child;
 const children = () => [state?.build.child, state?.deploy?.child].filter(Boolean);
+const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
+const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
+
+function status(r) {
+  if (r === deploying()) return 'deploying';
+  if (r.live) return 'live';
+  if (r.done) return 'failed';
+  if (r.bad || r.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) return 'bad';
+  if (state.queue.includes(r)) return 'queued';
+  return r.buildOk ? 'good' : r.stages.some((s) => s.status === 'running') ? 'building' : 'new';
+}
+const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad };
 
 function openRepo(dir) {
   if (children().length) throw new Error('Wait for the running stage to finish, or stop it.');
   const config = readConfig(dir);
-  const work = join(HOME, 'work', `${basename(dir)}-${createHash('sha256').update(dir).digest('hex').slice(0, 10)}`);
-  state = { repo: dir, name: basename(dir), workDirs: [work, `${work}-next`], config, prs: [], error: null, deploy: null };
+  const id = `${basename(dir)}-${createHash('sha256').update(dir).digest('hex').slice(0, 10)}`;
+  const work = join(HOME, 'work', id), recordFile = join(HOME, `builds-${id}.json`);
+  // Build numbers and what is live, kept between runs of the app.
+  const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : { next: 1, live: {} };
+  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile };
   state.build = newRun(work);
   send({ type: 'state', state: view() });
 }
 
 // What the page sees. Logs only on first connect; after that they stream as 'log' messages.
-// Row 2 shows the deploy running (or the last one) until the next batch is green and ready to go.
+// Row 2 shows the deploy running (or the last one) until the newest build is green and ready to go.
 function view(withLogs = false) {
   if (!state) return null;
-  const b = state.build, d = b.buildOk && !deploying() ? b : state.deploy ?? b, dep = deploying();
+  const b = state.build, dep = deploying(), d = dep ?? (b.buildOk && !state.queue.length ? b : state.deploy ?? b);
   const stages = [...b.stages.filter((s) => s.group === 'build'), ...d.stages.filter((s) => s.group === 'deploy')];
   return {
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
-    picked: b.picked, buildOk: b.buildOk, stackedOn: b.under?.picked ?? null,
-    building: building(), deploying: !!dep, deployingPrs: dep?.picked ?? [], deployWork: state.deploy?.work ?? null,
+    picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
+    queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
+    live: state.record.live[state.config.environment] ?? null, deployingBuild: summary(dep), deployRow: d.number,
+    building: building(), deploying: !!dep, deployingPrs: inFlight().flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
     stages: stages.map(({ env, run, log, ...s }) => (withLogs ? { ...s, log } : s)),
   };
@@ -170,23 +190,30 @@ function ensureWorktree(work) {
   git(state.repo, 'worktree', 'add', '--detach', work, `origin/${state.config.branch}`);
 }
 
-// While a batch deploys, the next one is stacked on it (its tested commit), in the other worktree. Once the deploying
-// batch is merged, main has the same files as that commit, so the stacked batch can go next without a rebuild.
+// A new build is stacked on the last build in flight (queued or deploying), in a worktree none of them is using.
+// Once the one under it is merged, main has the same files as its tested commit, so it can go next without a rebuild.
 async function build(picked, env) {
-  const under = deploying();
-  const work = under ? state.workDirs.find((w) => w !== under.work) : state.build.work;
+  const under = inFlight().at(-1) ?? null;
+  const used = inFlight().map((r) => r.work);
+  const work = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i === 0 ? state.work : i === 1 ? `${state.work}-next` : `${state.work}-${i + 1}`)).find((w) => !used.includes(w));
+  if (!work) throw new Error('Too many builds waiting. Let some deploy first.');
   ensureWorktree(work);
-  const run = state.build = newRun(work, picked, env, under);
+  const run = state.build = newRun(work, picked, env, under, state.record.next++);
+  saveRecord();
   state.error = null;
   send({ type: 'state', state: view(true) });
-  if (!(await runStage(run, run.stages[0], picked.map(String), under ? { ...env, PIPELINE_BASE: under.head } : env))) return;
-  // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
-  refreshStagesFromBatch(run);
+  let ok = await runStage(run, run.stages[0], picked.map(String), under ? { ...env, PIPELINE_BASE: under.head } : env);
+  if (ok) {
+    // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
+    refreshStagesFromBatch(run);
+    send({ type: 'state', state: view(true) });
+    for (const s of run.stages.filter((s) => s.group === 'build' && s.id !== 'batch')) if (!(ok = await runStage(run, s, [], env))) break;
+  }
+  if (ok && under?.bad) run.bad = `Build #${under.number} under it did not make it, so build again.`;
+  else if (ok) Object.assign(run, { buildOk: true, head: git(run.work, 'rev-parse', 'HEAD') }); // what the next build stacks on
+  else state.queue = state.queue.filter((r) => r !== run); // nothing is stacked on it yet: Build was busy
   send({ type: 'state', state: view(true) });
-  for (const s of run.stages.filter((s) => s.group === 'build' && s.id !== 'batch')) if (!(await runStage(run, s, [], env))) return;
-  if (under?.mergeFailed) state.error = 'The batch this one was stacked on did not merge, so build again.';
-  else run.buildOk = true;
-  send({ type: 'state', state: view(true) });
+  pump();
 }
 
 function refreshStagesFromBatch(run) {
@@ -195,27 +222,45 @@ function refreshStagesFromBatch(run) {
   run.stages = [batch, ...makeStages(state.config).slice(1)];
 }
 
+// A build that will never be deployed takes every build stacked on it down with it.
+function drop(r, why) {
+  state.queue = state.queue.filter((q) => q !== r);
+  for (const x of [...state.queue, state.build].filter((x) => x.under === r && !x.bad)) {
+    Object.assign(x, { bad: `Build #${r.number} under it ${why}, so build again.`, buildOk: false });
+    drop(x, 'was dropped');
+  }
+}
+
+// Deploys go one at a time, oldest queued build first, each once it is green.
+function pump() {
+  const next = state.queue[0];
+  if (!deploying() && !state.paused && next?.buildOk) deploy(state.queue.shift()).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+}
+
 // Same AWS profile as the build that was checked, whatever the box says now.
-async function deploy() {
-  const run = state.deploy = state.build;
+async function deploy(run) {
+  state.deploy = run;
   run.buildOk = false; // one deploy per green build
-  run.head = git(run.work, 'rev-parse', 'HEAD'); // what a batch built during this deploy stacks on
   try {
     for (const s of run.stages.filter((s) => s.group === 'deploy')) {
       if (await runStage(run, s, [], run.buildEnv)) continue;
-      if (s.id === 'merge') {
-        run.mergeFailed = true;
-        if (state.build.under === run && state.build.buildOk) {
-          state.build.buildOk = false;
-          state.error = 'The deploy before this batch did not merge, and this batch was stacked on it. Build again.';
-        }
-      }
+      if (s.id === 'merge') drop(run, 'did not merge'); // never deploy a build stacked on one that did not merge
       break;
     }
   } finally {
     run.done = true;
+    if (run.stages.every((s) => s.group !== 'deploy' || s.status === 'passed')) {
+      run.live = true;
+      state.record.live[state.config.environment] = { number: run.number, prs: run.prs, at: Date.now() };
+      saveRecord();
+    } else if (state.queue.length) {
+      // A failed or stopped deploy holds the queue: you look first, then resume it.
+      state.paused = true;
+      state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
+    }
     send({ type: 'state', state: view(true) });
     loadPrs().catch(() => {}); // merged PRs drop off the list
+    pump();
   }
 }
 
@@ -254,15 +299,25 @@ const server = http.createServer(async (req, res) => {
         if (building()) throw new Error('A build is already running.');
         const picked = (b.prs ?? []).map(Number);
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
-        if (picked.some((n) => deploying()?.picked.includes(n))) throw new Error('That PR is being deployed already.');
+        if (picked.some((n) => inFlight().some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is queued or deploying.');
         build(picked, profileEnv(b.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
         break;
       }
-      case '/api/deploy':
-        if (deploying()) throw new Error('Wait for the deploy that is running to finish. Deploys go one at a time.');
-        if (building()) throw new Error('Wait for the build to finish.');
-        if (!state?.build.buildOk) throw new Error('Run a build first. Deploy unlocks when every build stage passes.');
-        deploy().catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+      case '/api/deploy': {
+        // Queue the newest build. It deploys on its own once it is green and every build in front of it has deployed.
+        const r = state?.build;
+        if (!r?.buildOk && !building()) throw new Error('Run a build first. Deploy unlocks when every build stage passes.');
+        if (!state.queue.includes(r)) state.queue.push(r);
+        pump();
+        send({ type: 'state', state: view() });
+        break;
+      }
+      case '/api/queue':
+        // remove: only the last build in the queue, since the ones behind a build are stacked on it. resume: after a failed deploy.
+        if (b.action === 'remove' && state?.queue.at(-1)?.number === b.number) drop(state.queue.at(-1), 'came off the queue');
+        else if (b.action === 'resume' && state) { state.paused = false; state.error = null; pump(); }
+        else throw new Error('Only the last build in the queue can come off it.');
+        send({ type: 'state', state: view() });
         break;
       case '/api/stop':
         // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.

@@ -1,5 +1,5 @@
 // End to end: a throwaway repo with four open PRs (3 and 4 clash with 1), a fake gh, and fake stages. Build main + PR 1 and deploy it; while
-// that deploy runs, build PR 2 stacked on it; then deploy PR 2. Main on the "GitHub" remote ends up with both merged.
+// that deploy runs, build PR 2 stacked on it and queue it, then a third build behind that; they deploy on their own, in order. Main on the "GitHub" remote ends up with both merged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -75,23 +75,36 @@ esac
     assert.equal(state.buildOk, false, 'one deploy per build');
     assert.equal((await post('/api/build', { prs: [1] })).status, 400, 'PR 1 is being deployed');
 
-    // Step 2 is busy; the next batch builds anyway, in its own worktree, on top of the batch being deployed.
+    // Step 2 is busy; the next batch builds anyway, in its own worktree, on top of the build being deployed.
     assert.equal((await post('/api/build', { prs: [2] })).status, 200);
-    await until((s) => s.buildOk, 'green stacked build');
-    assert.deepEqual(state.stackedOn, [1]);
+    await until((s) => s.build.number === 3 && s.buildOk, 'green stacked build');
+    assert.equal(state.build.number, 3, 'build #1 clashed, #2 is PR 1, #3 is PR 2');
+    assert.equal(state.stackedOn, 2);
     assert.notEqual(state.work, state.deployWork);
-    assert.equal((await post('/api/deploy')).status, 400, 'one deploy at a time');
+    // Deploys go one at a time, so Deploy queues it behind build #2; it goes on its own when that is done.
+    assert.equal((await post('/api/deploy')).status, 200);
+    await until((s) => s.queued, 'build #3 queued');
+
+    // The queue can be deeper than one: build #4 (main, no new PRs) stacks on #3 and queues behind it.
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.build.number === 4 && s.buildOk, 'green build #4');
+    assert.equal(state.stackedOn, 3);
+    assert.equal((await post('/api/deploy')).status, 200);
+    await until((s) => s.queue.map((b) => b.number).join() === '3,4', 'queue is #3, #4');
+    assert.equal((await post('/api/queue', { action: 'remove', number: 3 })).status, 400, 'only the last build comes off the queue');
+    assert.equal(state.deployingBuild.number, 2);
+    assert.equal(state.live, null);
 
     writeFileSync(join(tmp, 'gate'), '');
-    await until((s) => !s.deploying, 'deploy of PR 1 finished');
-    assert.match(sh(tmp, `git --git-dir=remote.git log -1 --format=%s main`), /Merge pull request #1/);
-    assert.equal(sh(state.deployWork, 'cat deployed.txt').trim(), 'me');
-
-    assert.equal((await post('/api/deploy')).status, 200);
-    await until((s) => !s.deploying && s.stages.at(-1).status !== 'waiting', 'deploy of PR 2 finished');
+    await until((s) => !s.deploying && !s.queue.length && s.live?.number === 4, 'builds #2, #3, #4 deployed in order');
     assert.deepEqual(state.stages.map((s) => s.status), ['passed', 'passed', 'passed', 'passed']);
-    assert.match(sh(tmp, `git --git-dir=remote.git log -1 --format=%s main`), /Merge pull request #2/);
+    assert.equal(sh(tmp, `git --git-dir=remote.git log --format=%s main | grep 'Merge pull request'`), 'Merge pull request #2\nMerge pull request #1\n');
     assert.equal(sh(tmp, 'git --git-dir=remote.git show main:pr.txt main:pr2.txt'), 'pr\npr2\n');
+    assert.equal(sh(state.deployWork, 'cat deployed.txt').trim(), 'me');
+    // Build numbers and what is live survive a restart of the app.
+    const record = JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json'));
+    assert.equal(record.next, 5);
+    assert.deepEqual(record.live.test.prs, []);
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
