@@ -13,9 +13,9 @@ or tick the pull request that adds it.
 **"Could not list PRs"**
 The GitHub CLI isn't signed in, or the repo's `origin` isn't on GitHub. Run `gh auth status` in the repo folder.
 
-**"Left out PR #12: it clashes with main or with a PR added before it."**
-Two changes touch the same lines, so that PR was left out and the rest of the batch built without it. Update the
-pull request on GitHub (merge main into it) and build again to get it in.
+**"PR #12 clashes with main or with a PR added before it."**
+Two changes touch the same lines. The log lists every pull request that clashed in that run. Update them on GitHub
+(merge main into each), or untick them, and build again.
 
 **"Main changed on GitHub since the build. Run the build again."**
 Someone pushed to the branch after you built. Build again so the new commits are tested too.

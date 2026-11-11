@@ -71,7 +71,7 @@
   .steps > span { display: flex; gap: 6px; align-items: center; }
   .icon { width: 18px; height: 18px; flex: none; }
   .steps .icon { width: 13px; height: 13px; }
-  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped, .skipped { color: var(--stop); }
+  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); }
   .running.icon { animation: pulse 1.2s var(--ease) infinite; }
   .arrow svg { width: 16px; height: 16px; display: block; }
   @keyframes pulse { 50% { opacity: 0.35; } }
@@ -126,7 +126,7 @@ async function post(path, body = {}) {
 function showError(text) { const e = $('error'); e.textContent = text || ''; e.hidden = !text; }
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped', skipped: 'Left out' };
+const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped' };
 // One drawn set: filled disc + white mark for an outcome, outline ring while waiting, half disc while running.
 const mark = {
   waiting: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/>',
@@ -134,7 +134,6 @@ const mark = {
   passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="var(--mark)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="var(--mark)" stroke-width="2" stroke-linecap="round"/>',
   stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="var(--mark)"/>',
-  skipped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="M5.5 9h7" stroke="var(--mark)" stroke-width="2" stroke-linecap="round"/>',
 };
 const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
 function took(s) {
@@ -169,7 +168,7 @@ function draw() {
 
   $('prs').innerHTML = state.prs.length ? state.prs.map((p) => `<li><label>
       <input type="checkbox" value="${p.number}" ${picked.has(p.number) && !p.draft && !inDeploy(p.number) ? 'checked' : ''} ${busy || p.draft || inDeploy(p.number) ? 'disabled' : ''}>
-      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? '<span class="tag">deploying</span>' : ''}${state.leftOut.includes(p.number) ? '<span class="tag skipped">left out: clashes</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
+      <span>#${p.number} ${esc(p.title)}${p.draft ? '<span class="tag">draft</span>' : ''}${inDeploy(p.number) ? '<span class="tag">deploying</span>' : ''}<small>${esc(p.branch)} by ${esc(p.author)}</small></span>
     </label></li>`).join('') : '<li class="empty">No open pull requests.</li>';
   const n = pickable().length;
   $('build').textContent = (state.deploying ? 'Build next batch' : `Build ${state.config.branch}`) + (n ? ` + ${n} PR${n > 1 ? 's' : ''}` : '');
@@ -181,14 +180,13 @@ function draw() {
   const merged = state.picked.length ? `merges ${state.picked.map((x) => '#' + x).join(', ')} into ${state.config.branch} on GitHub, then deploys.` : `deploys ${state.config.branch} as it is.`;
   const arrow = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h9m-3.5-3.5L12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
   const stacked = state.stackedOn ? `, stacked on ${state.stackedOn.length ? state.stackedOn.map((x) => '#' + x).join(', ') : 'the deploy'}` : '';
-  const out = state.leftOut.length ? ` Left out ${state.leftOut.map((x) => '#' + x).join(', ')}: clashes, see the Batch PRs log.` : '';
   const gate = state.buildOk && state.deploying ? 'Build passed. Unlocks when the deploy that is running finishes.'
     : state.buildOk ? 'Build passed. This ' + merged
     : state.deploying && !busy ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
   $('flow').innerHTML = `<div class="row"><h3>1. Build<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
     <div class="row"><h3>2. Deploy<small>Your click</small></h3><div class="group">
       <div class="gate"><button class="btn primary" id="deploy" ${state.buildOk && !busy && !state.deploying ? '' : 'disabled'}>Deploy to ${esc(state.config.environment)}</button>
-        <p>${gate}${esc(out)}</p></div>
+        <p>${gate}</p></div>
       ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
