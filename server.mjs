@@ -115,7 +115,7 @@ function view(withLogs = false) {
   const builds = history(), saved = JSON.stringify(builds);
   if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
-    builds,
+    builds, planned: state.record.steps ?? {},
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
@@ -175,6 +175,8 @@ function runStage(run, stage, extraArgs, env) {
       for (const s of stage.steps) if (s.status === 'running') s.status = ok ? 'passed' : 'failed';
       Object.assign(stage, { status: ok ? 'passed' : signal ? 'stopped' : 'failed', ended: Date.now() });
       run.running = null;
+      // A stage's steps are only known once it prints them, so remember a full run's steps to show before the next.
+      if (ok) { (state.record.steps ??= {})[stage.name] = [...new Set(stage.steps.map((t) => t.name.replace(/#\d+/g, '#N')))]; saveRecord(); }
       send({ type: 'state', state: view() });
       res(ok);
     });

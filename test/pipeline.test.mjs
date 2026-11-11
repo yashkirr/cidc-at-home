@@ -124,6 +124,10 @@ esac
     const old = await (await post('/api/build-log', { number: 3 })).json();
     assert.match(old.stages.find((s) => s.id === 'deploy0').log.join('\n'), /== Upload/);
     assert.equal(JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json')).builds.length, 6, 'saved for after a restart');
+    // Each stage's steps from its last full run, shown in the stage before a build reaches it. PR numbers are generic.
+    assert.deepEqual(state.planned.Checks, ['Lint', 'Tests']);
+    assert.deepEqual(state.planned['Merge on GitHub'], ['Main unchanged', 'Main matches the tested batch']);
+    assert.ok(state.planned['Batch PRs'].includes('Get main'));
 
     // Rollback to build #2 (main with PR 1 only): rebuilds the commit #2 deployed and runs the deploy stages, as build
     // #7. Main on GitHub stays as it is, and the queue pauses so the next deploy does not ship PR 2 again by itself.
