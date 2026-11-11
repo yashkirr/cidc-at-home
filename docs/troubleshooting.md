@@ -14,8 +14,8 @@ or tick the pull request that adds it.
 The GitHub CLI isn't signed in, or the repo's `origin` isn't on GitHub. Run `gh auth status` in the repo folder.
 
 **"PR #12 clashes with main or with a PR added before it."**
-Two changes touch the same lines. Update that pull request on GitHub (merge main into it), or leave it out of this
-batch and build again.
+Two changes touch the same lines. The log lists every pull request that clashed in that run. Update them on GitHub
+(merge main into each), or untick them, and build again.
 
 **"Main changed on GitHub since the build. Run the build again."**
 Someone pushed to the branch after you built. Build again so the new commits are tested too.

@@ -111,6 +111,7 @@ function capture(cmd, args, cwd) {
 }
 
 // Runs one stage in the lane's worktree. Lines starting "== " are the stage's steps; the last step fails if the stage does.
+// A line starting "!! " fails the current step; the stage can go on to show what else is wrong before it exits.
 function runStage(run, stage, extraArgs, env) {
   return new Promise((res) => {
     Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
@@ -150,6 +151,10 @@ function addLine(stage, raw) {
   if (step) {
     for (const s of stage.steps) if (s.status === 'running') s.status = 'passed';
     stage.steps.push({ name: step[1], status: 'running' });
+    send({ type: 'state', state: view() });
+  }
+  if (line.startsWith('!! ') && stage.steps.at(-1)?.status === 'running') {
+    stage.steps.at(-1).status = 'failed';
     send({ type: 'state', state: view() });
   }
   stage.log.push(line);
