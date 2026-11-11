@@ -47,6 +47,7 @@
   :focus-visible { outline: 3px solid var(--run); outline-offset: 2px; }
   main { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 20px; padding: 20px; max-width: 1500px; margin: 0 auto; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 12px 16px; } }
+  .full { grid-column: 1 / -1; }
   section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; min-width: 0; }
   .prs { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 6px; max-height: 52vh; overflow: auto; }
   .prs label { align-items: flex-start; color: var(--text); padding: 8px; border-radius: 8px; cursor: pointer; min-height: 44px; }
@@ -55,39 +56,45 @@
   .prs small { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
   .tag { white-space: nowrap; font-size: 12px; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; color: var(--muted); margin-left: 4px; }
   .empty { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
-  .flow { display: grid; gap: 14px; }
-  .row { display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: start; }
-  .row > h3 { margin: 12px 0 0; font-size: 14px; }
-  .row > h3 small { display: block; color: var(--muted); font-weight: 400; font-size: 13px; }
-  .group { display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; }
-  @media (max-width: 600px) { .row { grid-template-columns: 1fr; gap: 6px; } .row > h3 { margin: 0; } .group { flex-direction: column; } .stage, .gate { width: 100% !important; } .group .arrow { display: none; } }
-  .stage { width: 196px; flex: none; text-align: left; display: flex; flex-direction: column; justify-content: flex-start; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; cursor: pointer;
-           transition: transform 150ms var(--ease), border-color 150ms var(--ease); }
+  /* The pipeline is one flow, left to right: queue, build stages, the deploy gate, deploy stages, what is live. */
+  .flow { display: flex; align-items: stretch; overflow-x: auto; padding: 2px 2px 10px; scrollbar-color: var(--wait) transparent; }
+  .node { flex: 1 1 0; min-width: 150px; max-width: 240px; text-align: left; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .stage { cursor: pointer; transition: transform 150ms var(--ease), border-color 150ms var(--ease); }
   .stage:active { transform: scale(0.98); }
   .stage[aria-pressed=true] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
-  .stage .top { display: flex; gap: 8px; align-items: center; font-weight: 600; }
-  .stage .time { display: block; color: var(--muted); font-size: 13px; margin: 2px 0 6px 26px; }
-  .steps { margin: 0; padding: 0 0 0 26px; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
+  .node .top { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .node .who { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 8px 0 0; min-height: 22px; }
+  .node .time { display: block; color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+  .chip { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 1px 8px; border-radius: 99px; background: color-mix(in srgb, var(--text) 8%, transparent); }
+  .chip.running { background: color-mix(in srgb, var(--run) 16%, transparent); }
+  .chip.passed { background: color-mix(in srgb, var(--pass) 16%, transparent); }
+  .chip.failed, .chip.bad { background: color-mix(in srgb, var(--fail) 16%, transparent); }
+  .none { color: var(--muted); font-size: 13px; }
+  .node .under { margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
+  .node .under:empty { display: none; }
+  .gate { border-style: dashed; gap: 8px; background: transparent; }
+  .gate p { margin: 0; font-size: 13px; color: var(--muted); }
+  .gate .btn { width: 100%; padding: 0 12px; }
+  .queue ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+  .queue li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 28px; }
+  .queue li .btn { margin-left: auto; min-height: 28px; padding: 0 8px; font-size: 12px; }
+  .live { border-color: color-mix(in srgb, var(--pass) 45%, var(--line)); }
+  .live .prs-in { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .arrow { align-self: center; color: var(--muted); flex: none; padding: 0 6px; }
+  .arrow svg { width: 16px; height: 16px; display: block; }
+  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node { max-width: none; } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
+  .steps { margin: 0; padding: 0; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
   .steps > span { display: flex; gap: 6px; align-items: center; }
   .icon { width: 18px; height: 18px; flex: none; }
   .steps .icon { width: 13px; height: 13px; }
   .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); }
   .running.icon { animation: pulse 1.2s var(--ease) infinite; }
-  .arrow svg { width: 16px; height: 16px; display: block; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
-  .arrow { align-self: center; color: var(--muted); flex: none; }
-  .gate { width: 196px; flex: none; display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: 12px; }
-  .gate p { margin: 0; font-size: 13px; color: var(--muted); }
   .bar { display: flex; gap: 10px; align-items: center; margin: 16px 0 8px; flex-wrap: wrap; }
   .bar h2 { margin: 0; }
   pre { margin: 0; background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 12px; height: 46vh; overflow: auto; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 12%, transparent); color: var(--text); border: 1px solid var(--fail); }
-  .builds { display: grid; gap: 8px; margin: 0 0 18px; }
-  .build { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
-  .build b { white-space: nowrap; }
-  .build .what { flex: 1; min-width: 180px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
-  .build.live { border-color: var(--pass); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -100,18 +107,18 @@
   <label>AWS profile (optional) <input type="text" id="profile" placeholder="default" autocomplete="off" spellcheck="false"></label>
 </header>
 <main>
+  <section class="panel full" aria-labelledby="flowTitle">
+    <div id="error" class="msg" role="alert" hidden></div>
+    <h2 id="flowTitle">Pipeline</h2>
+    <div class="flow" id="flow"></div>
+  </section>
   <section class="panel" aria-labelledby="prsTitle">
     <div class="bar first"><h2 id="prsTitle">Open pull requests</h2><span class="grow"></span><button class="btn small" id="refresh">Refresh</button></div>
     <ul class="prs" id="prs"></ul>
     <button class="btn primary wide" id="build">Build</button>
   </section>
-  <section class="panel" aria-labelledby="flowTitle">
-    <div id="error" class="msg" role="alert" hidden></div>
-    <h2 id="buildsTitle">Builds</h2>
-    <div class="builds" id="builds" aria-labelledby="buildsTitle"></div>
-    <h2 id="flowTitle">Pipeline</h2>
-    <div class="flow" id="flow"></div>
-    <div class="bar"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
+  <section class="panel" aria-labelledby="logTitle">
+    <div class="bar first"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
     <pre id="log" tabindex="0" aria-labelledby="logTitle"></pre>
     <p class="sr" aria-live="polite" id="live"></p>
   </section>
@@ -149,11 +156,13 @@ function took(s) {
   return `${label[s.status]}, ${sec < 60 ? sec + ' s' : Math.floor(sec / 60) + ' min ' + (sec % 60) + ' s'}`;
 }
 
-function stageCard(s) {
-  return `<button class="stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
+// Each stage is a node in the flow: its name and state, the build in it, and its checks underneath.
+function stageCard(s, build) {
+  return `<button class="node stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
+    <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : '<span class="none">No build</span>'}</span>
     <span class="time">${took(s)}</span>
-    <span class="steps">${s.steps.map((t) => `<span>${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')}</span>
+    <span class="under steps">${s.steps.map((t) => `<span>${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')}</span>
   </button>`;
 }
 
@@ -196,12 +205,30 @@ function draw() {
     : busy ? `Queue build #${num} now to deploy as soon as it passes.`
     : state.buildOk ? `Build #${num} passed. This ` + merged
     : state.deploying ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
-  $('flow').innerHTML = `<div class="row"><h3>1. Build${num ? ' #' + num : ''}<small>Automatic${esc(stacked)}</small></h3><div class="group">${build.map(stageCard).join(arrow)}</div></div>
-    <div class="row"><h3>2. Deploy<small>${state.deployRow ? 'Build #' + state.deployRow : 'Your click'}</small></h3><div class="group">
-      <div class="gate">${state.queued ? '' : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'} to ${esc(state.config.environment)}</button>`}
-        <p>${gate}</p></div>
-      ${arrow}${deploy.map(stageCard).join(arrow)}</div></div>`;
-  drawBuilds();
+  const env = esc(state.config.environment), l = state.live;
+  const qItem = (b, i) => {
+    const st = state.building && state.build.number === b.number ? 'Building' : 'Green';
+    const last = i === state.queue.length - 1;
+    return `<li><span class="chip ${st === 'Green' ? 'passed' : 'running'}">#${b.number}</span><span>${st}</span>${last ? `<button class="btn" data-remove="${b.number}" aria-label="Take build #${b.number} off the queue">Remove</button>` : ''}</li>`;
+  };
+  const queueNode = `<div class="node queue" role="group" aria-label="Deploy queue">
+      <span class="top">Queue</span>
+      <span class="who">${state.queue.length ? `<span class="chip">${state.queue.length} waiting</span>` : '<span class="none">Empty</span>'}</span>
+      <span class="time">${state.paused ? 'Paused after a failed deploy' : 'Deploys in this order'}</span>
+      <div class="under">${state.paused ? '<button class="btn small" id="resume">Resume queue</button>' : ''}${state.queue.length ? `<ol>${state.queue.map(qItem).join('')}</ol>` : ''}</div>
+    </div>`;
+  const gateNode = `<div class="node gate" role="group" aria-label="Deploy">
+      <span class="top">Deploy to ${env}</span>
+      ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'}</button>`}
+      <p>${gate}</p>
+    </div>`;
+  const liveNode = `<div class="node live" role="group" aria-label="Live in ${env}">
+      <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${env}</span>
+      <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>` : '<span class="none">Nothing yet</span>'}</span>
+      <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
+      <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
+    </div>`;
+  $('flow').innerHTML = [queueNode, ...build.map((s) => stageCard(s, num)), gateNode, ...deploy.map((s) => stageCard(s, state.deployRow)), liveNode].join(arrow);
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
 
@@ -214,27 +241,6 @@ function draw() {
   const live = state.stages.map((s) => `${s.name} ${label[s.status]}`).join(', ');
   if (live !== lastLive) { $('live').textContent = live; lastLive = live; }
 }
-
-// Builds panel: what is live in the environment, what is deploying, and the queue waiting behind it.
-const statusText = { new: 'Waiting', building: 'Building', good: 'Green', bad: 'Bad', queued: 'Queued', deploying: 'Deploying', live: 'Live', failed: 'Deploy failed' };
-const prList = (prs) => prs.length ? prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`;
-const buildRow = (b, label, extra = '') => `<div class="build ${b.status}"><b>${label} · Build #${b.number}</b><span class="what">${prList(b.prs)}</span>${extra}</div>`;
-function drawBuilds() {
-  const env = esc(state.config.environment), l = state.live;
-  const q = state.queue.map((b, i) => {
-    const st = b.status === 'queued' && state.build.number === b.number && state.building ? 'Building' : b.status === 'queued' ? 'Green' : statusText[b.status];
-    return buildRow(b, `Queue ${i + 1}`, `<span class="tag">${st}</span>` + (i === state.queue.length - 1 ? `<button class="btn small" data-remove="${b.number}">Take off queue</button>` : ''));
-  });
-  $('builds').innerHTML = (l ? buildRow({ ...l, status: 'live' }, `Live in ${env}`, `<span class="tag">${new Date(l.at).toLocaleString()}</span>`) : `<p class="empty">Nothing deployed to ${env} yet.</p>`)
-    + (state.deployingBuild ? buildRow(state.deployingBuild, 'Deploying now') : '')
-    + (state.paused ? `<div class="msg">Queue paused after a failed deploy. <button class="btn small" id="resume">Resume queue</button></div>` : '')
-    + (q.join('') || '<p class="empty">Queue empty.</p>');
-}
-$('builds').addEventListener('click', (e) => {
-  const rm = e.target.closest('[data-remove]');
-  if (rm) post('/api/queue', { action: 'remove', number: Number(rm.dataset.remove) });
-  if (e.target.closest('#resume')) post('/api/queue', { action: 'resume' });
-});
 
 new EventSource('/events').onmessage = (e) => {
   const m = JSON.parse(e.data);
@@ -278,6 +284,9 @@ $('flow').addEventListener('click', (e) => {
     if (confirm(`This will ${what} to ${state.config.environment}${when}. Go?`)) post('/api/deploy');
     return;
   }
+  const rm = e.target.closest('[data-remove]');
+  if (rm) return post('/api/queue', { action: 'remove', number: Number(rm.dataset.remove) });
+  if (e.target.closest('#resume')) return post('/api/queue', { action: 'resume' });
   const card = e.target.closest('.stage');
   if (card) { selected = card.dataset.id; render(); }
 });
