@@ -84,6 +84,7 @@
   .arrow svg { width: 16px; height: 16px; display: block; }
   @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node { max-width: none; } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
   .steps { margin: 0; padding: 0; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
+  .steps > .todo { color: var(--muted); }
   .steps > span { display: flex; gap: 6px; align-items: center; }
   .icon { width: 18px; height: 18px; flex: none; }
   .steps .icon { width: 13px; height: 13px; }
@@ -180,8 +181,16 @@ function stageCard(s, build) {
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
     <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : '<span class="none">No build</span>'}</span>
     <span class="time">${took(s)}</span>
-    <span class="under steps">${s.steps.map((t) => `<span>${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')}</span>
+    <span class="under steps">${stepList(s)}</span>
   </button>`;
+}
+// The stage's steps so far, then the rest of what ran there last time, still to come.
+function stepList(s) {
+  const seen = new Set(s.steps.map((t) => t.name.replace(/#\d+/g, '#N')));
+  const todo = s.status === 'passed' ? [] : (state.planned[s.name] ?? []).filter((n) => !seen.has(n)).map((name) => ({ name, status: 'waiting' }));
+  const all = [...s.steps, ...todo];
+  return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')
+    : '<span class="todo">Its steps show here after its first run.</span>';
 }
 
 // Redrawing replaces the PR list and stage cards, so put keyboard focus back where it was.

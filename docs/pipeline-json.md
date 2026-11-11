@@ -47,6 +47,9 @@ echo "== Tests"; npm test
 The page shows "Lint" and "Tests" under the stage, each with its own tick. When a stage fails, the step that was
 running is the one marked failed.
 
+After a stage's first full run, the page remembers its steps and lists them greyed out under the stage, even
+when no build is there. That's how you see what will run where. PR numbers in step names show as `#N`.
+
 Tip: put each stage in a script in your repo (`scripts/check.sh`) and keep `pipeline.json` short. The same script then
 works from a terminal too.
 
