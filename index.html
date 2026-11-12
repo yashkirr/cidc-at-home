@@ -172,6 +172,7 @@ const mark = {
 };
 const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
 function took(s) {
+  if (s.interrupted) return 'Stopped when the app closed';
   if (!s.started) return label[s.status];
   const sec = Math.round(((s.ended || Date.now()) - s.started) / 1000);
   return `${label[s.status]}, ${sec < 60 ? sec + ' s' : Math.floor(sec / 60) + ' min ' + (sec % 60) + ' s'}`;

@@ -56,7 +56,7 @@ let state = null;
 const clients = new Set();
 const send = (msg) => { const data = `data: ${JSON.stringify(msg)}\n\n`; for (const c of clients) c.write(data); };
 
-const fresh = { status: 'waiting', steps: [], log: [], started: null, ended: null };
+const fresh = { status: 'waiting', steps: [], log: [], started: null, ended: null, interrupted: false };
 const makeStages = (config) => [
   { id: 'batch', group: 'build', name: 'Batch PRs', run: `bash "${join(HERE, 'batch.sh')}"` },
   ...config.build.map((s, i) => ({ id: `build${i}`, group: 'build', ...s })),
@@ -86,7 +86,7 @@ const saveDeploy = () => {
   try {
     writeFileSync(state.deployFile + '.tmp', JSON.stringify({ number: r.number, at: r.at, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
       rollbackOf: r.rollbackOf ?? null, live: !!r.live, deployedSha: r.deployedSha ?? null,
-      stages: r.stages.map((s) => ({ id: s.id, status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, pid: s.status === 'running' ? s.pid : null })) }), { mode: 0o600 });
+      stages: r.stages.map((s) => ({ id: s.id, status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, interrupted: !!s.interrupted, pid: s.status === 'running' ? s.pid : null })) }), { mode: 0o600 });
     renameSync(state.deployFile + '.tmp', state.deployFile);
   } catch (e) { console.error(`Could not save the deploy: ${e.message}`); }
 };
@@ -101,9 +101,9 @@ function restoreDeploy() {
     const run = newRun(String(d.work), d.picked.map(Number), profileEnv(d.buildEnv?.AWS_PROFILE), null, Number(d.number));
     const byId = new Map(makeStages(readConfig(run.work)).map((s) => [s.id, s]));
     run.stages = d.stages.filter((s) => byId.has(s.id)).map((s) => {
-      const st = { ...byId.get(s.id), status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended };
+      const st = { ...byId.get(s.id), status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, interrupted: !!s.interrupted };
       if (st.status === 'running') {
-        Object.assign(st, { status: 'stopped', ended: Date.now() });
+        Object.assign(st, { status: 'stopped', interrupted: true }); // its run time is unknown: the app was down
         for (const t of st.steps) if (t.status === 'running') t.status = 'failed';
         st.log.push('The app stopped while this stage ran. Retry runs it again.');
         // Ctrl+C stops stages with the app, but a crash leaves them running: say so, so it does not run twice.
