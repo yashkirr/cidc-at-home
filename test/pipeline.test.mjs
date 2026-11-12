@@ -21,9 +21,9 @@ test('build a batch with a PR, then deploy merges it and runs the deploy stages'
     // Checks wait for checkgate, so the test can start a build while the one before is still checking.
     build: [{ name: 'Checks', run: `echo "== Lint"; until [ -f "${join(tmp, 'checkgate')}" ]; do sleep 0.1; done; echo ok; echo "== Tests"; test -f a.txt && test -f pr.txt` }],
     // Waits for the test to open the gate, so the next batch is built while this deploy is still running.
-    deploy: [{ name: 'Release', run: `echo "== Upload"; until [ -f "${join(tmp, 'gate')}" ]; do sleep 0.1; done; echo "$WHO" > deployed.txt`, env: { WHO: 'me' } },
-      // Starts together with Release, so it is done while Release still waits at the gate.
-      { name: 'App', parallel: true, run: 'echo "== Send"; echo app > app.txt' }],
+    deploy: [{ name: 'Release', run: `echo "== Upload"; until [ -f "${join(tmp, 'gate')}" ]; do sleep 0.1; done; if [ -f "${join(tmp, 'failonce')}" ]; then rm "${join(tmp, 'failonce')}"; exit 1; fi; echo "$WHO" > deployed.txt`, env: { WHO: 'me' } },
+      // Starts together with Release, so it is done while Release still waits at the gate. Counts its runs for the retry check.
+      { name: 'App', parallel: true, run: `echo "== Send"; echo app > app.txt; echo x >> "${join(tmp, 'app-runs')}"` }],
   }));
   sh(repo, `echo a > a.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm init && git push -q origin main
     git checkout -qb pr && echo pr > pr.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm pr && git push -q origin pr:refs/pull/1/head
@@ -145,6 +145,23 @@ esac
     const rb = await (await post('/api/build-log', { number: 7 })).json();
     assert.deepEqual(rb.stages.map((s) => [s.name, s.status]), [['Batch PRs', 'passed'], ['Checks', 'passed'], ['Release', 'passed'], ['App', 'passed']], 'no merge on GitHub in a rollback');
     assert.deepEqual(state.builds.slice(0, 3).map((b) => [b.number, b.status]), [[7, 'live'], [6, 'good'], [5, 'replaced']]);
+
+    // A deploy stage fails after the merge: Retry runs just that stage again for the same build, with no new merge.
+    assert.equal((await post('/api/queue', { action: 'resume' })).status, 200);
+    writeFileSync(join(tmp, 'failonce'), '');
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.build.number === 8 && s.buildOk, 'green build #8');
+    assert.equal((await post('/api/deploy')).status, 200);
+    await until((s) => s.retry === 'deploy0' && !s.deploying, 'build #8 fails its Release');
+    assert.equal(state.live.number, 7);
+    assert.equal((await post('/api/retry', { number: 7 })).status, 400, 'only the last deploy');
+    const merges = sh(tmp, 'git --git-dir=remote.git rev-list --count main'), appRuns = sh(tmp, 'wc -l < app-runs');
+    assert.equal((await post('/api/retry', { number: 8 })).status, 200);
+    await until((s) => s.live?.number === 8 && !s.deploying, 'retried build #8 is live');
+    assert.equal(state.retry, null);
+    assert.equal(sh(tmp, 'git --git-dir=remote.git rev-list --count main'), merges, 'no new merge');
+    assert.equal(sh(tmp, 'wc -l < app-runs'), appRuns, 'App passed beside the failed Release, so the retry does not run it again');
+    assert.deepEqual((await (await post('/api/build-log', { number: 8 })).json()).stages.map((s) => s.status), ['passed', 'passed', 'passed', 'passed', 'passed']);
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();

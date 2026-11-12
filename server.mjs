@@ -127,6 +127,7 @@ function view(withLogs = false) {
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
     live: state.record.live[state.config.environment] ?? null, deployingBuild: summary(dep), deployRow: d.number,
     building: building(), canBuild: !batching(), deploying: !!dep, deployingPrs: [...inFlight(), ...(building() ? [b] : [])].flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
+    retry: d === state.deploy ? retryable()?.id ?? null : null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
     stages: stages.map(({ env, run, log, ...s }) => (withLogs ? { ...s, log } : s)),
   };
@@ -313,11 +314,15 @@ function pump() {
 }
 
 // Same AWS profile as the build that was checked, whatever the box says now.
-async function deploy(run) {
+// from: a retry starts at the failed stage, in the same folder, with the merge already done.
+async function deploy(run, from = 'merge') {
   state.deploy = run;
-  run.buildOk = false; // one deploy per green build
+  Object.assign(run, { buildOk: false, done: false }); // one deploy per green build
   try {
-    await runStages(run, run.stages.filter((s) => s.group === 'deploy'), run.buildEnv);
+    // A retry skips stages that already passed beside the failed one, so a parallel peer does not run twice.
+    const stages = run.stages.filter((s) => s.group === 'deploy');
+    const todo = stages.slice(stages.findIndex((s) => s.id === from)).filter((s) => from === 'merge' || s.status !== 'passed');
+    await runStages(run, todo, run.buildEnv);
     // Never deploy a build stacked on one that did not merge.
     if (run.stages.find((s) => s.id === 'merge')?.status !== 'passed') drop(run, 'did not merge');
   } finally {
@@ -336,6 +341,24 @@ async function deploy(run) {
     loadPrs().catch(() => {}); // merged PRs drop off the list
     pump();
   }
+}
+
+// The last deploy's failed stage, if it can run again: its merge passed, nothing is deploying, not a rollback.
+function retryable() {
+  const r = state?.deploy;
+  if (!r || deploying() || r.rollbackOf || r.stages.find((s) => s.id === 'merge')?.status !== 'passed') return null;
+  return r.stages.find((s) => s.group === 'deploy' && ['failed', 'stopped'].includes(s.status)) ?? null;
+}
+// Retry reruns that stage and the ones after it, for the same build. It does not merge again or touch the queue:
+// a paused queue stays paused until you resume it.
+function retryStart(number) {
+  const s = retryable(), r = state?.deploy;
+  if (!s || r.number !== number) throw new Error('Only a failed stage of the last deploy can run again.');
+  // The build's folder must still hold what it merged: a newer build may have taken it since.
+  const used = [...state.queue, ...(building() ? [state.build] : [])].some((x) => x.work === r.work);
+  if (used || git(r.work, 'rev-parse', 'HEAD^{tree}') !== git(r.work, 'rev-parse', `${r.head}^{tree}`)) throw new Error(`A newer build has used build #${number}'s folder since. Build again to deploy it.`);
+  state.error = null;
+  deploy(r, s.id).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
 }
 
 // Checks that can fail fast happen before the response; the rollback itself runs on.
@@ -405,6 +428,10 @@ const server = http.createServer(async (req, res) => {
       case '/api/rollback':
         if (!state) throw new Error('Add a repo first.');
         await rollbackStart(Number(b.number), profileEnv(b.profile));
+        break;
+      case '/api/retry':
+        if (!state) throw new Error('Add a repo first.');
+        retryStart(Number(b.number));
         break;
       case '/api/queue':
         // remove: only the last build in the queue, since the ones behind a build are stacked on it. resume: after a failed deploy.

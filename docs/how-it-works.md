@@ -77,6 +77,10 @@ pull requests and build them while the deploy runs.
 - **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
 - If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
   stacked on it is marked bad and dropped, because it was built on code main does not have.
+- **Retry:** if a deploy stage after the merge fails (say a sign-in ran out), fix the cause, click the failed stage,
+  and press **Retry** above its log. It runs that stage and the ones after it again for the same build (a parallel stage that passed beside it is skipped), in the same
+  folder. Nothing is merged again, and a paused queue stays paused until you resume it. A failed merge can't be
+  retried: build again.
 - **Merge on GitHub** checks that the branch on GitHub has the same *files* the batch was built on. Once the batch
   under it is merged, it does, so the stacked batch deploys without a rebuild. If the batch under it did not merge, the
   page asks you to build again, and the merge stage refuses anyway.
