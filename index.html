@@ -132,7 +132,7 @@
     <button class="btn primary wide" id="build">Build</button>
   </section>
   <section class="panel" aria-labelledby="logTitle">
-    <div class="bar first"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
+    <div class="bar first"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small primary" id="retry" hidden></button><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
     <pre id="log" tabindex="0" aria-labelledby="logTitle"></pre>
     <p class="sr" aria-live="polite" id="live"></p>
   </section>
@@ -261,6 +261,10 @@ function draw() {
 
   drawHistory();
   const sel = viewing ?? state.stages.find((s) => s.id === selected) ?? state.stages[0];
+  // Retry sits above the log, named for the failed stage, so it shows even when another stage's log is open.
+  const failed = state.stages.find((s) => s.id === state.retry);
+  $('retry').hidden = !failed;
+  if (failed) $('retry').textContent = `Retry ${failed.name}`;
   $('logTitle').textContent = viewing ? `Log: Build #${viewing.number} · ${sel.name}` : `Log: ${sel.name}`;
   const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   log.textContent = sel.log.join('\n').replace(/^\n+/, '');
@@ -309,7 +313,7 @@ new EventSource('/events').onmessage = (e) => {
     // The server was restarted (maybe updated): this page's token and code are stale, so start over.
     if (m.boot) { if (boot && boot !== m.boot) return location.reload(); boot = m.boot; }
     if (m.repos) repos = m.repos;
-    if (!state && m.state) picked = new Set(m.state.picked); // a new tab shows the batch already built
+    if (!state && m.state) { picked = new Set(m.state.picked); selected = m.state.retry ?? selected; } // a new tab shows the batch already built, or the failed stage's log
     state = m.state; if (state) repos = state.repos;
     for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
     const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id));
@@ -353,6 +357,10 @@ $('flow').addEventListener('click', (e) => {
 });
 const pickable = () => [...picked].filter((x) => state.prs.some((p) => p.number === x && !p.draft) && !state.deployingPrs.includes(x));
 $('build').addEventListener('click', () => { showError(''); post('/api/build', { prs: pickable(), profile: profile.value.trim() }); });
+$('retry').addEventListener('click', () => {
+  const s = state.stages.find((x) => x.id === state.retry);
+  if (s && confirm(`Run ${s.name} again for build #${state.deployRow}, then the stages after it? Nothing is merged again.`)) post('/api/retry', { number: state.deployRow });
+});
 $('stopBuild').addEventListener('click', () => post('/api/stop', { lane: 'build' }));
 $('stopDeploy').addEventListener('click', () => post('/api/stop', { lane: 'deploy' }));
 $('refresh').addEventListener('click', () => post('/api/prs'));
