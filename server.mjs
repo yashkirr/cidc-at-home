@@ -78,6 +78,37 @@ const stop = (cs) => { for (const c of cs) try { process.kill(-c.pid, 'SIGTERM')
 const children = () => kids([...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])]);
 const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
 const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
+// The last deploy with its stage results and logs, so Retry still works after the app restarts. Logs can hold secrets.
+const saveDeploy = () => {
+  const r = state?.deploy;
+  if (r) writeFileSync(state.deployFile, JSON.stringify({ number: r.number, at: r.at, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
+    rollbackOf: r.rollbackOf ?? null, live: !!r.live, deployedSha: r.deployedSha ?? null, stages: r.stages.map(({ id, status, steps, log, started, ended }) => ({ id, status, steps, log, started, ended })) }), { mode: 0o600 });
+};
+// Stage commands come from the build's own pipeline.json, as when it ran; only results come from the file.
+// A stage that was running when the app stopped comes back stopped, so Retry can run it again.
+function restoreDeploy() {
+  if (!existsSync(state.deployFile)) return null;
+  try {
+    const d = JSON.parse(readFileSync(state.deployFile, 'utf8'));
+    const run = newRun(String(d.work), d.picked.map(Number), profileEnv(d.buildEnv?.AWS_PROFILE), null, Number(d.number));
+    const byId = new Map(makeStages(readConfig(run.work)).map((s) => [s.id, s]));
+    run.stages = d.stages.filter((s) => byId.has(s.id)).map((s) => {
+      const st = { ...byId.get(s.id), status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended };
+      if (st.status === 'running') {
+        Object.assign(st, { status: 'stopped', ended: Date.now() });
+        for (const t of st.steps) if (t.status === 'running') t.status = 'failed';
+        st.log.push('The app stopped while this stage ran. Retry runs it again.');
+      }
+      return st;
+    });
+    Object.assign(run, { at: d.at, head: d.head, prs: d.prs, rollbackOf: d.rollbackOf, live: d.live, deployedSha: d.deployedSha, done: true });
+    state.runs.set(run.number, run);
+    return run;
+  } catch (e) {
+    console.error(`Could not load the last deploy: ${e.message}`);
+    return null;
+  }
+}
 
 function status(r) {
   if (r === deploying()) return 'deploying';
@@ -102,12 +133,13 @@ function openRepo(dir) {
   if (children().length) throw new Error('Wait for the running stage to finish, or stop it.');
   const config = readConfig(dir);
   const id = `${basename(dir)}-${createHash('sha256').update(dir).digest('hex').slice(0, 10)}`;
-  const work = join(HOME, 'work', id), recordFile = join(HOME, `builds-${id}.json`);
+  const work = join(HOME, 'work', id), recordFile = join(HOME, `builds-${id}.json`), deployFile = join(HOME, `deploy-${id}.json`);
   // Build numbers and what is live, kept between runs of the app.
   const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : { next: 1, live: {} };
   record.builds = (record.builds ?? []).map((b) => (['new', 'building', 'good', 'queued', 'deploying'].includes(b.status) ? { ...b, status: 'stopped' } : b));
-  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, runs: new Map(), saved: '' };
+  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, deployFile, runs: new Map(), saved: '' };
   state.build = newRun(work);
+  state.deploy = restoreDeploy();
   send({ type: 'state', state: view() });
 }
 
@@ -159,6 +191,7 @@ function runStage(run, stage, extraArgs, env) {
     Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
     send({ type: 'reset', stage: stage.id });
     send({ type: 'state', state: view() });
+    if (run === state.deploy) saveDeploy();
     const args = extraArgs.map((a) => ` ${a}`).join('');
     const child = spawn('bash', ['-c', stage.run + args], {
       cwd: run.work, detached: true,
@@ -182,6 +215,7 @@ function runStage(run, stage, extraArgs, env) {
       Object.assign(stage, { status: ok ? 'passed' : signal ? 'stopped' : 'failed', ended: Date.now() });
       // A stage's steps are only known once it prints them, so remember a full run's steps to show before the next.
       if (ok) { (state.record.steps ??= {})[stage.name] = [...new Set(stage.steps.map((t) => t.name.replace(/#\d+/g, '#N')))]; saveRecord(); }
+      if (run === state.deploy) saveDeploy();
       send({ type: 'state', state: view() });
       res(ok);
     });
@@ -294,6 +328,7 @@ async function rollback(to, env) {
       saveRecord();
       state.error = `Rolled back to build #${to}. Main on GitHub is still ahead of what is live, so the queue is paused. Revert the bad change on GitHub, then resume the queue.`;
     } else state.error = `The rollback to build #${to} did not finish. Check its log.`;
+    saveDeploy();
     send({ type: 'state', state: view(true) });
   }
 }
@@ -337,6 +372,7 @@ async function deploy(run, from = 'merge') {
       state.paused = true;
       state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
     }
+    saveDeploy();
     send({ type: 'state', state: view(true) });
     loadPrs().catch(() => {}); // merged PRs drop off the list
     pump();
@@ -464,6 +500,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   });
   // Closing the window stops a running stage too, rather than leaving a deploy running unseen.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stop(children()); process.exit(1); });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stop(children()); try { saveDeploy(); } catch {} process.exit(1); });
   server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} is busy. Is the pipeline already open? Try ${`http://localhost:${PORT}/`}` : e.message); process.exit(1); });
 }

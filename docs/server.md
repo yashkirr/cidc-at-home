@@ -60,8 +60,8 @@ See [examples/vps-docker-compose.json](../examples/vps-docker-compose.json) and
 
 ## Things to know
 
-- Restarting the app forgets the current run (the page goes back to "Waiting"). The repo list and the private copies
-  stay.
+- Restarting the app forgets builds still building or queued. The repo list, the private copies and the last deploy
+  (with its stage results, so Retry still works) stay.
 - One build and one deploy at a time. A build can run while a deploy does (see
   [how it works](how-it-works.md#build-the-next-batch-while-one-deploys)); a second Build while one is running gets
   "A build is already running".
