@@ -84,7 +84,7 @@
   .par > .node { max-width: none; flex: 1 0 auto; }
   .arrow { align-self: center; color: var(--muted); flex: none; padding: 0 6px; }
   .arrow svg { width: 16px; height: 16px; display: block; }
-  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node, .par { max-width: none; } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
+  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node, .par { max-width: none; } .par { padding-left: 10px; border-left: 2px solid var(--line); } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
   .steps { margin: 0; padding: 0; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
   .steps > .todo { color: var(--muted); }
   .steps > span { display: flex; gap: 6px; align-items: center; }
