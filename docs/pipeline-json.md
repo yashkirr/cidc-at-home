@@ -20,7 +20,7 @@
 | Field | Required | What it does |
 |---|---|---|
 | `branch` | no, default `main` | The branch you release from. Builds start from it, and pull requests into it are listed. |
-| `environment` | no, default `prod` | A name for where deploys go. It is only shown on the page ("Deploy to prod"). |
+| `environment` | no, default `prod` | A name for where deploys go ("Deploy to prod", "Live in prod"). Deploy stages make this environment live unless they name their own. |
 | `build` | no | Stages run by the **Build** button, in order. |
 | `deploy` | no | Stages run by the **Deploy** button, in order. |
 
@@ -31,9 +31,10 @@ Each stage:
 | `name` | yes | Shown on the stage card. |
 | `run` | yes | A shell command, run with `bash -c` in the private copy of your repo. Exit 0 = passed. |
 | `env` | no | Extra environment variables for this stage. A value starting with `~/` gets your home folder. |
+| `environment` | no | Deploy stages only. The environment this stage makes live, if not the pipeline's own. See [Environments](#environments). |
 | `parallel` | no | `true` starts this stage at the same time as the stage before it. Ignored on the first stage of `build` or `deploy`, so nothing deploys before the merge. |
 
-The first failing stage stops the run. Later stages stay "Waiting". Stages running in parallel all finish first.
+The first failing stage stops the run (for deploy stages, the later stages of its environment). Later stages stay "Waiting". Stages running in parallel all finish first.
 
 ## Parallel stages
 
@@ -48,9 +49,26 @@ uploads, and both start right after the merge:
 ```
 
 The page stacks them in one column. Both run in the same private copy, so they must not write the same files. The
-next stage (if any) waits for both. A deploy is live only when every stage passed.
+next stage (if any) waits for both. An environment is live only when every one of its stages passed: give the app
+its own `environment` (below) so the website does not wait on the app store.
 
-## Steps
+## Environments
+
+Each deploy stage makes one environment live: the pipeline's `environment`, or its own. An environment goes live
+when the merge and all of its stages pass. The page has a "Live in" card for each, showing the build live there.
+
+```json
+"environment": "prod",
+"deploy": [
+  { "name": "Deploy", "run": "bash scripts/release.sh" },
+  { "name": "iOS app", "run": "eas build -p ios --auto-submit --no-wait", "parallel": true, "environment": "TestFlight" }
+]
+```
+
+If "iOS app" fails, the build is still live in prod, and TestFlight keeps the build it had. A failed stage stops the
+later stages of its own environment only. The queue pauses only when the pipeline's own environment does not go live.
+Retry runs the failed stage again, and TestFlight goes live when it passes. A rollback runs every deploy stage again.
+
 
 A stage can have steps. Any line the command prints that starts with `== ` (two equals signs and a space) starts a
 new step:

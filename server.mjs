@@ -34,18 +34,21 @@ function addRepo(path) {
 // pipeline.json: { "branch": "main", "environment": "prod", "build": [stage], "deploy": [stage] },
 // stage = { "name": "...", "run": "shell command", "env": { "KEY": "value, ~/ = your home folder" }, "parallel": true }.
 // "parallel" starts a stage together with the one before it. Ignored on a list's first stage, so a deploy stage never
-// runs beside the merge.
+// runs beside the merge. "environment" (deploy stages): what the stage makes live, e.g. "TestFlight"; default: the
+// pipeline's own "environment". Each environment goes live when the merge and all of its own stages pass.
 export function readConfig(dir) {
   const file = join(dir, 'pipeline.json');
   if (!existsSync(file)) throw new Error(`No pipeline.json in ${dir}. The README shows what goes in it.`);
   const c = JSON.parse(readFileSync(file, 'utf8'));
-  const stages = (list) => (Array.isArray(list) ? list : []).map((s, i) => {
+  const stages = (list, environment) => (Array.isArray(list) ? list : []).map((s, i) => {
     if (typeof s?.name !== 'string' || typeof s?.run !== 'string') throw new Error('Every stage in pipeline.json needs a name and a run command.');
-    return { name: s.name, run: s.run, parallel: i > 0 && s.parallel === true, env: Object.fromEntries(Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/^~\//, homedir() + '/')])) };
+    if (s.environment != null && (typeof s.environment !== 'string' || !s.environment.trim())) throw new Error(`pipeline.json: "${s.name}" has an empty environment.`);
+    return { name: s.name, run: s.run, parallel: i > 0 && s.parallel === true, environment: environment && (s.environment ?? environment), env: Object.fromEntries(Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/^~\//, homedir() + '/')])) };
   });
   const branch = c.branch ?? 'main';
   if (!/^\w[\w./-]*$/.test(branch)) throw new Error('pipeline.json: branch is not a valid branch name.');
-  return { branch, environment: c.environment ?? 'prod', build: stages(c.build), deploy: stages(c.deploy) };
+  const environment = typeof c.environment === 'string' && c.environment.trim() ? c.environment : 'prod';
+  return { branch, environment, build: stages(c.build), deploy: stages(c.deploy, environment) };
 }
 
 // One pipeline state for the open repo. Stages: batch, build stages, (gate), merge, deploy stages.
@@ -167,7 +170,10 @@ function view(withLogs = false) {
     config: { branch: state.config.branch, environment: state.config.environment },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
-    live: state.record.live[state.config.environment] ?? null, deployingBuild: summary(dep), deployRow: d.number,
+    live: state.record.live[state.config.environment] ?? null,
+    // Every environment the deploy stages make live, the pipeline's own first, with the build live in each.
+    lives: [...new Set([state.config.environment, ...state.config.deploy.map((s) => s.environment)])].map((e) => ({ environment: e, live: state.record.live[e] ?? null })),
+    deployingBuild: summary(dep), deployRow: d.number,
     building: building(), canBuild: !batching(), deploying: !!dep, deployingPrs: [...inFlight(), ...(building() ? [b] : [])].flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
     retry: d === state.deploy ? retryable()?.id ?? null : null,
     running: stages.filter((s) => s.status === 'running').map((s) => s.id),
@@ -251,16 +257,35 @@ function addLine(stage, raw) {
 }
 
 // Runs stages in order. A "parallel" stage starts with the one before it; the next stage waits for all of them.
-// Stops after the first group with a stage that did not pass, once that whole group has finished.
+// A stage that does not pass stops the later stages of its environment, once its whole group has finished. Other
+// environments go on. Build stages and the merge have none, so they stop everything.
 async function runStages(run, stages, env) {
+  const failed = new Set();
   for (let i = 0; i < stages.length;) {
     let j = i + 1;
     while (stages[j]?.parallel) j++;
-    const oks = await Promise.all(stages.slice(i, j).map((s) => runStage(run, s, [], env)));
-    if (oks.includes(false)) return false;
+    const group = stages.slice(i, j).filter((s) => !failed.has(s.environment));
+    const oks = await Promise.all(group.map((s) => runStage(run, s, [], env)));
+    group.forEach((s, k) => oks[k] || failed.add(s.environment));
+    if (failed.has(undefined)) return false;
     i = j;
   }
-  return true;
+  return !failed.size;
+}
+
+// Marks live each environment whose stages all passed in this deploy (the merge too, if it has one). A retry that
+// only reran another environment's stage keeps the time a build first went live.
+function markLive(run, extra = {}) {
+  const deploy = run.stages.filter((s) => s.group === 'deploy');
+  if (deploy.some((s) => s.id === 'merge' && s.status !== 'passed')) return [];
+  const envs = [...new Set(deploy.map((s) => s.environment).filter(Boolean))];
+  const went = envs.filter((e) => deploy.every((s) => s.environment !== e || s.status === 'passed'));
+  for (const e of went) {
+    const was = state.record.live[e];
+    state.record.live[e] = { number: run.number, prs: run.prs, at: was?.number === run.number ? was.at : Date.now(), ...extra };
+  }
+  if (went.length) saveRecord();
+  return went;
 }
 
 function ensureWorktree(work) {
@@ -334,10 +359,10 @@ async function rollback(to, env) {
     if (ok) await runStages(run, run.stages.slice(1), env);
   } finally {
     run.done = true;
-    if (run.stages.every((s) => s.status === 'passed')) {
-      Object.assign(run, { live: true, deployedSha: target.deployedSha });
-      state.record.live[state.config.environment] = { number: run.number, prs: run.prs, at: Date.now(), rollbackOf: to };
-      saveRecord();
+    const went = run.stages[0].status === 'passed' ? markLive(run, { rollbackOf: to }) : [];
+    if (went.length) Object.assign(run, { deployedSha: target.deployedSha });
+    if (went.includes(state.config.environment)) {
+      run.live = true;
       state.error = `Rolled back to build #${to}. Main on GitHub is still ahead of what is live, so the queue is paused. Revert the bad change on GitHub, then resume the queue.`;
     } else state.error = `The rollback to build #${to} did not finish. Check its log.`;
     saveDeploy();
@@ -374,13 +399,12 @@ async function deploy(run, from = 'merge') {
     if (run.stages.find((s) => s.id === 'merge')?.status !== 'passed') drop(run, 'did not merge');
   } finally {
     run.done = true;
-    if (run.stages.every((s) => s.group !== 'deploy' || s.status === 'passed')) {
-      run.live = true;
-      run.deployedSha = git(run.work, 'rev-parse', 'HEAD'); // main's commit after the merge: what a rollback redeploys
-      state.record.live[state.config.environment] = { number: run.number, prs: run.prs, at: Date.now() };
-      saveRecord();
-    } else if (state.queue.length) {
-      // A failed or stopped deploy holds the queue: you look first, then resume it.
+    const went = markLive(run);
+    if (went.length) run.deployedSha = git(run.work, 'rev-parse', 'HEAD'); // main's commit after the merge: what a rollback redeploys
+    if (went.includes(state.config.environment)) run.live = true;
+    else if (state.queue.length) {
+      // A deploy that did not make the pipeline's own environment live holds the queue: you look first, then resume it.
+      // Another environment failing (say TestFlight) does not: the next deploy ships it again.
       state.paused = true;
       state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
     }

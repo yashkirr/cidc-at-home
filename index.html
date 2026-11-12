@@ -182,7 +182,7 @@ function took(s) {
 function stageCard(s, build) {
   return `<button class="node stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
-    <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : '<span class="none">No build</span>'}</span>
+    <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : '<span class="none">No build</span>'}${s.environment && s.environment !== state.config.environment ? `<span class="none">to ${esc(s.environment)}</span>` : ''}</span>
     <span class="time">${took(s)}</span>
     <span class="under steps">${stepList(s)}</span>
   </button>`;
@@ -235,7 +235,7 @@ function draw() {
     : busy ? `Queue build #${num} now to deploy as soon as it passes.`
     : state.buildOk ? `Build #${num} passed. This ` + merged
     : state.deploying ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
-  const env = esc(state.config.environment), l = state.live;
+  const env = esc(state.config.environment);
   const qItem = (b, i) => {
     const st = b.building ? 'Building' : 'Green';
     const last = i === state.queue.length - 1;
@@ -252,12 +252,14 @@ function draw() {
       ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'}</button>`}
       <p>${gate}</p>
     </div>`;
-  const liveNode = `<div class="node live" role="group" aria-label="Live in ${env}">
-      <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${env}</span>
+  // One card per environment the deploy makes live (pipeline.json "environment"), stacked like parallel stages.
+  const liveCard = ({ environment, live: l }) => `<div class="node live" role="group" aria-label="Live in ${esc(environment)}">
+      <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${esc(environment)}</span>
       <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
       <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
       <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
     </div>`;
+  const liveNode = state.lives.length > 1 ? `<div class="par" role="group" aria-label="Environments">${state.lives.map(liveCard).join('')}</div>` : liveCard(state.lives[0]);
   // Stages that run at the same time ("parallel" in pipeline.json) stack in one column.
   const cards = (list, n) => list.reduce((cols, s) => (s.parallel && cols.length ? cols.at(-1).push(s) : cols.push([s]), cols), [])
     .map((col) => (col.length > 1 ? `<div class="par" role="group" aria-label="Run at the same time">${col.map((s) => stageCard(s, n)).join('')}</div>` : stageCard(col[0], n)));
