@@ -60,7 +60,9 @@ pull requests and build them while the deploy runs.
   instead of the branch on GitHub, then merges the new pull requests on top. The ones being deployed are greyed out.
 - Every batch is a numbered **build** (Build #1, #2, ...). The **Builds** box on the page shows the build live in
   the environment and its PRs, the build deploying now, and the queue behind it. Numbers and the live build are kept
-  in `~/.cicd-at-home/builds-<repo>-<id>.json`, so they survive a restart.
+  in `~/.cicd-at-home/builds-<repo>-<id>.json`, so they survive a restart. The last deploy's stage results and logs
+  are kept in `deploy-<repo>-<id>.json` beside it, so a failed deploy stage can still be retried after a restart. A
+  stage that was running when the app stopped comes back as Stopped; Retry runs it again.
 - Deploys go one at a time. While one runs, Deploy says **Queue deploy**. Press it while the build is still running
   or once it is green. Queued builds deploy on their own, oldest first, each once it is green. The queue can hold
   several builds (each in its own worktree, up to 10 in flight), each stacked on the one in front of it.

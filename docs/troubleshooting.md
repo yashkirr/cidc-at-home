@@ -36,4 +36,5 @@ Close the app, then delete the copy and tell git it is gone:
 `git -C /path/to/your/repo worktree remove --force ~/.cicd-at-home/work/<repo>-<id>`. The next build makes a new one.
 
 **The page shows "Waiting" after I restarted the app.**
-The current run lives in memory only. Build again.
+Builds still building or queued live in memory only. Build again. The last deploy comes back with its stage results:
+if a stage failed, or was running when the app stopped, Retry runs it again.

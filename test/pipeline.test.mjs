@@ -44,19 +44,22 @@ esac
 
   const port = 43000 + Math.floor(Math.random() * 1000);
   const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, PIPELINE_PORT: String(port), PIPELINE_NO_OPEN: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
-  const server = spawn(process.execPath, [join(HERE, '..', 'server.mjs'), repo], { env, stdio: ['ignore', 'pipe', 'inherit'] });
-  try {
+  const base = `http://localhost:${port}`;
+  let server, token, events, state; // state: the latest from the event stream
+  const post = (p, b = {}) => fetch(base + p, { method: 'POST', headers: { 'x-token': token, 'content-type': 'application/json' }, body: JSON.stringify(b) });
+  const start = async () => {
+    server = spawn(process.execPath, [join(HERE, '..', 'server.mjs'), repo], { env, stdio: ['ignore', 'pipe', 'inherit'] });
     await new Promise((res) => server.stdout.once('data', res));
-    const base = `http://localhost:${port}`;
-    const token = (await (await fetch(base + '/')).text()).match(/const TOKEN = '(\w+)'/)[1];
-    const post = (p, b = {}) => fetch(base + p, { method: 'POST', headers: { 'x-token': token, 'content-type': 'application/json' }, body: JSON.stringify(b) });
-
-    // Latest state from the event stream.
-    let state;
-    const events = await fetch(base + '/events');
+    token = (await (await fetch(base + '/')).text()).match(/const TOKEN = '(\w+)'/)[1];
+    state = null;
+    events = await fetch(base + '/events');
     (async () => { const dec = new TextDecoder(); let buf = '';
       for await (const chunk of events.body) { buf += dec.decode(chunk); let i;
         while ((i = buf.indexOf('\n\n')) >= 0) { const m = JSON.parse(buf.slice(6, i)); buf = buf.slice(i + 2); if (m.type === 'state') state = m.state; } } })().catch(() => {});
+  };
+  const restart = async () => { events.body.cancel().catch(() => {}); const gone = new Promise((r) => server.once('exit', r)); server.kill(); await gone; await start(); };
+  try {
+    await start();
     const until = async (ok, what) => { for (let i = 0; i < 300; i++) { if (state && ok(state)) return; await new Promise((r) => setTimeout(r, 100)); } assert.fail(`timed out: ${what}; ${JSON.stringify(state?.stages?.map((s) => [s.id, s.status, s.log?.slice(-3), s.steps]))}`); };
 
     await until((s) => s.prs.length === 4, 'PR list');
@@ -155,6 +158,23 @@ esac
     await until((s) => s.retry === 'deploy0' && !s.deploying, 'build #8 fails its Release');
     assert.equal(state.live.number, 7);
     assert.equal((await post('/api/retry', { number: 7 })).status, 400, 'only the last deploy');
+    // The failed stage survives a restart of the app. So does one that was running when the app stopped: it comes back
+    // stopped, and Retry runs it again.
+    rmSync(join(tmp, 'gate'));
+    await restart();
+    await until((s) => s.retry === 'deploy0' && s.deployRow === 8, 'failed Release back after restart');
+    const merges0 = sh(tmp, 'git --git-dir=remote.git rev-list --count main');
+    assert.equal((await post('/api/retry', { number: 8 })).status, 200);
+    await until((s) => s.running.includes('deploy0'), 'Release running again, at the gate');
+    await restart();
+    await until((s) => s.retry === 'deploy0', 'interrupted Release back after restart');
+    const rel = state.stages.find((s) => s.id === 'deploy0');
+    assert.equal(rel.status, 'stopped');
+    assert.equal(rel.interrupted, true);
+    assert.equal(rel.log.at(-1), 'The app stopped while this stage ran. Retry runs it again.');
+    assert.equal(state.builds.find((b) => b.number === 8).status, 'failed');
+    assert.equal(sh(tmp, 'git --git-dir=remote.git rev-list --count main'), merges0, 'no merge on restart');
+    writeFileSync(join(tmp, 'gate'), '');
     const merges = sh(tmp, 'git --git-dir=remote.git rev-list --count main'), appRuns = sh(tmp, 'wc -l < app-runs');
     assert.equal((await post('/api/retry', { number: 8 })).status, 200);
     await until((s) => s.live?.number === 8 && !s.deploying, 'retried build #8 is live');
