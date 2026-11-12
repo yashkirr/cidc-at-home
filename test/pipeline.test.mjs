@@ -194,6 +194,7 @@ esac
     await until((s) => s.live?.number === 9 && !s.deploying, 'build #9 live in test without App');
     assert.deepEqual(state.lives.map((l) => [l.environment, l.live.number]), [['test', 9], ['store', 8]]);
     assert.equal(state.paused, false);
+    assert.match(state.error, /live in test, but not in store/);
     assert.equal(state.retry, 'deploy1');
     const at = state.live.at;
     assert.equal((await post('/api/retry', { number: 9 })).status, 200);

@@ -69,6 +69,7 @@ If "iOS app" fails, the build is still live in prod, and TestFlight keeps the bu
 later stages of its own environment only. The queue pauses only when the pipeline's own environment does not go live.
 Retry runs the failed stage again, and TestFlight goes live when it passes. A rollback runs every deploy stage again.
 
+## Steps
 
 A stage can have steps. Any line the command prints that starts with `== ` (two equals signs and a space) starts a
 new step:
