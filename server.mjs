@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,11 +78,17 @@ const stop = (cs) => { for (const c of cs) try { process.kill(-c.pid, 'SIGTERM')
 const children = () => kids([...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])]);
 const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
 const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
-// The last deploy with its stage results and logs, so Retry still works after the app restarts. Logs can hold secrets.
+// The last deploy with its stage results and logs, so Retry still works after the app restarts. Logs can hold secrets,
+// so only you can read the file; written whole then renamed, so a kill mid-write leaves the old one.
 const saveDeploy = () => {
   const r = state?.deploy;
-  if (r) writeFileSync(state.deployFile, JSON.stringify({ number: r.number, at: r.at, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
-    rollbackOf: r.rollbackOf ?? null, live: !!r.live, deployedSha: r.deployedSha ?? null, stages: r.stages.map(({ id, status, steps, log, started, ended }) => ({ id, status, steps, log, started, ended })) }), { mode: 0o600 });
+  if (!r) return;
+  try {
+    writeFileSync(state.deployFile + '.tmp', JSON.stringify({ number: r.number, at: r.at, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
+      rollbackOf: r.rollbackOf ?? null, live: !!r.live, deployedSha: r.deployedSha ?? null,
+      stages: r.stages.map((s) => ({ id: s.id, status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, pid: s.status === 'running' ? s.pid : null })) }), { mode: 0o600 });
+    renameSync(state.deployFile + '.tmp', state.deployFile);
+  } catch (e) { console.error(`Could not save the deploy: ${e.message}`); }
 };
 // Stage commands come from the build's own pipeline.json, as when it ran; only results come from the file.
 // A stage that was running when the app stopped comes back stopped, so Retry can run it again.
@@ -90,6 +96,8 @@ function restoreDeploy() {
   if (!existsSync(state.deployFile)) return null;
   try {
     const d = JSON.parse(readFileSync(state.deployFile, 'utf8'));
+    // A newer build used its folder since: nothing there to retry, and its pipeline.json is not this build's.
+    if (git(String(d.work), 'rev-parse', 'HEAD^{tree}') !== git(String(d.work), 'rev-parse', `${d.head}^{tree}`)) return null;
     const run = newRun(String(d.work), d.picked.map(Number), profileEnv(d.buildEnv?.AWS_PROFILE), null, Number(d.number));
     const byId = new Map(makeStages(readConfig(run.work)).map((s) => [s.id, s]));
     run.stages = d.stages.filter((s) => byId.has(s.id)).map((s) => {
@@ -98,6 +106,8 @@ function restoreDeploy() {
         Object.assign(st, { status: 'stopped', ended: Date.now() });
         for (const t of st.steps) if (t.status === 'running') t.status = 'failed';
         st.log.push('The app stopped while this stage ran. Retry runs it again.');
+        // Ctrl+C stops stages with the app, but a crash leaves them running: say so, so it does not run twice.
+        try { if (s.pid) { process.kill(-s.pid, 0); st.log.push(`It may still be running (process ${s.pid}). Check before you retry.`); } } catch {}
       }
       return st;
     });
@@ -191,13 +201,14 @@ function runStage(run, stage, extraArgs, env) {
     Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
     send({ type: 'reset', stage: stage.id });
     send({ type: 'state', state: view() });
-    if (run === state.deploy) saveDeploy();
     const args = extraArgs.map((a) => ` ${a}`).join('');
     const child = spawn('bash', ['-c', stage.run + args], {
       cwd: run.work, detached: true,
       env: { ...process.env, ...env, ...stage.env, PIPELINE_WORK: run.work, PIPELINE_BRANCH: state.config.branch, FORCE_COLOR: '0', CI: '1' },
     });
     run.kids.add(child);
+    stage.pid = child.pid;
+    if (run === state.deploy) saveDeploy();
     let partial = '';
     const onData = (d) => {
       const lines = (partial + d).split(/\r?\n/);
@@ -295,7 +306,8 @@ function refreshStagesFromBatch(run) {
 
 // A worktree no build in flight is using. Up to 10, one per build.
 function freeWork() {
-  const used = [...inFlight(), ...(building() ? [state.build] : [])].map((r) => r.work);
+  // A failed deploy keeps its folder, so Retry can still run there.
+  const used = [...inFlight(), ...(building() ? [state.build] : []), ...(retryable() ? [state.deploy] : [])].map((r) => r.work);
   const work = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (i === 0 ? state.work : i === 1 ? `${state.work}-next` : `${state.work}-${i + 1}`)).find((w) => !used.includes(w));
   if (!work) throw new Error('Too many builds waiting. Let some deploy first.');
   ensureWorktree(work);
@@ -500,6 +512,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   });
   // Closing the window stops a running stage too, rather than leaving a deploy running unseen.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stop(children()); try { saveDeploy(); } catch {} process.exit(1); });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => {
+    stop(children());
+    for (const s of state?.deploy?.stages ?? []) s.pid = null; // stopped just now, so no "may still be running" next time
+    saveDeploy();
+    process.exit(1);
+  });
   server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} is busy. Is the pipeline already open? Try ${`http://localhost:${PORT}/`}` : e.message); process.exit(1); });
 }

@@ -170,7 +170,7 @@ esac
     await until((s) => s.retry === 'deploy0', 'interrupted Release back after restart');
     const rel = state.stages.find((s) => s.id === 'deploy0');
     assert.equal(rel.status, 'stopped');
-    assert.match(rel.log.at(-1), /app stopped while this stage ran/);
+    assert.equal(rel.log.at(-1), 'The app stopped while this stage ran. Retry runs it again.');
     assert.equal(state.builds.find((b) => b.number === 8).status, 'failed');
     assert.equal(sh(tmp, 'git --git-dir=remote.git rev-list --count main'), merges0, 'no merge on restart');
     writeFileSync(join(tmp, 'gate'), '');
