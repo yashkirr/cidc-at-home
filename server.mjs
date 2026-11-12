@@ -73,6 +73,8 @@ const building = () => !!state && state.build !== deploying() && state.build.kid
 // The next build can start once the newest one has its batch (its commit to stack on), even while its checks run.
 const batching = () => building() && !state.build.head;
 const kids = (runs) => runs.flatMap((r) => (r ? [...r.kids] : []));
+// A stage that just exited can still be listed until its close event, so a failed kill must not skip the others.
+const stop = (cs) => { for (const c of cs) try { process.kill(-c.pid, 'SIGTERM'); } catch {} };
 const children = () => kids([...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])]);
 const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
 const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
@@ -413,7 +415,7 @@ const server = http.createServer(async (req, res) => {
         break;
       case '/api/stop':
         // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.
-        for (const c of b.lane === 'build' ? kids([state.build, ...state.queue].filter((r) => r !== deploying())) : b.lane === 'deploy' ? kids([deploying()]) : children()) process.kill(-c.pid, 'SIGTERM');
+        stop(b.lane === 'build' ? kids([state.build, ...state.queue].filter((r) => r !== deploying())) : b.lane === 'deploy' ? kids([deploying()]) : children());
         break;
       default: return json(res, 404, { error: 'No such action.' });
     }
@@ -435,6 +437,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   });
   // Closing the window stops a running stage too, rather than leaving a deploy running unseen.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { for (const c of children()) process.kill(-c.pid, 'SIGTERM'); process.exit(1); });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stop(children()); process.exit(1); });
   server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} is busy. Is the pipeline already open? Try ${`http://localhost:${PORT}/`}` : e.message); process.exit(1); });
 }

@@ -152,9 +152,13 @@ esac
 });
 
 test('parallel is ignored on the first stage of a list, so nothing deploys beside the merge', async () => {
-  const { readConfig } = await import('../server.mjs');
   const dir = mkdtempSync(join(tmpdir(), 'pipeline-cfg-'));
-  writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({ deploy: [{ name: 'A', run: 'a', parallel: true }, { name: 'B', run: 'b', parallel: true }, { name: 'C', run: 'c', parallel: 'yes' }] }));
-  assert.deepEqual(readConfig(dir).deploy.map((s) => s.parallel), [false, true, false]);
-  rmSync(dir, { recursive: true });
+  process.env.HOME = dir; // importing the server makes its state folder in HOME
+  try {
+    const { readConfig } = await import('../server.mjs');
+    writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({ deploy: [{ name: 'A', run: 'a', parallel: true }, { name: 'B', run: 'b', parallel: true }, { name: 'C', run: 'c', parallel: 'yes' }] }));
+    assert.deepEqual(readConfig(dir).deploy.map((s) => s.parallel), [false, true, false]);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });

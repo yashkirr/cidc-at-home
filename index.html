@@ -317,7 +317,8 @@ new EventSource('/events').onmessage = (e) => {
     if (!state && m.state) picked = new Set(m.state.picked); // a new tab shows the batch already built
     state = m.state; if (state) repos = state.repos;
     for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
-    const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id));
+    // A stage that starts beside the one you are watching ("parallel") leaves that log open.
+    const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id) && !(state.stages.find((s) => s.id === id)?.parallel && state.running.includes(selected)));
     if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
     wasRunning = state?.running ?? [];
     render();
