@@ -31,8 +31,24 @@ Each stage:
 | `name` | yes | Shown on the stage card. |
 | `run` | yes | A shell command, run with `bash -c` in the private copy of your repo. Exit 0 = passed. |
 | `env` | no | Extra environment variables for this stage. A value starting with `~/` gets your home folder. |
+| `parallel` | no | `true` starts this stage at the same time as the stage before it. Ignored on the first stage of `build` or `deploy`, so nothing deploys before the merge. |
 
-The first failing stage stops the run. Later stages stay "Waiting".
+The first failing stage stops the run. Later stages stay "Waiting". Stages running in parallel all finish first.
+
+## Parallel stages
+
+Two deploy stages that don't need each other can run side by side. Here the app goes to the store while the website
+uploads, and both start right after the merge:
+
+```json
+"deploy": [
+  { "name": "Website", "run": "bash scripts/release.sh" },
+  { "name": "App", "run": "bash scripts/app-release.sh", "parallel": true }
+]
+```
+
+The page stacks them in one column. Both run in the same private copy, so they must not write the same files. The
+next stage (if any) waits for both. A deploy is live only when every stage passed.
 
 ## Steps
 
