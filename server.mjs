@@ -32,14 +32,16 @@ function addRepo(path) {
 }
 
 // pipeline.json: { "branch": "main", "environment": "prod", "build": [stage], "deploy": [stage] },
-// stage = { "name": "...", "run": "shell command", "env": { "KEY": "value, ~/ = your home folder" } }.
+// stage = { "name": "...", "run": "shell command", "env": { "KEY": "value, ~/ = your home folder" }, "parallel": true }.
+// "parallel" starts a stage together with the one before it. Ignored on a list's first stage, so a deploy stage never
+// runs beside the merge.
 export function readConfig(dir) {
   const file = join(dir, 'pipeline.json');
   if (!existsSync(file)) throw new Error(`No pipeline.json in ${dir}. The README shows what goes in it.`);
   const c = JSON.parse(readFileSync(file, 'utf8'));
-  const stages = (list) => (Array.isArray(list) ? list : []).map((s) => {
+  const stages = (list) => (Array.isArray(list) ? list : []).map((s, i) => {
     if (typeof s?.name !== 'string' || typeof s?.run !== 'string') throw new Error('Every stage in pipeline.json needs a name and a run command.');
-    return { name: s.name, run: s.run, env: Object.fromEntries(Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/^~\//, homedir() + '/')])) };
+    return { name: s.name, run: s.run, parallel: i > 0 && s.parallel === true, env: Object.fromEntries(Object.entries(s.env ?? {}).map(([k, v]) => [k, String(v).replace(/^~\//, homedir() + '/')])) };
   });
   const branch = c.branch ?? 'main';
   if (!/^\w[\w./-]*$/.test(branch)) throw new Error('pipeline.json: branch is not a valid branch name.');
@@ -62,15 +64,18 @@ const makeStages = (config) => [
   ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
 const newRun = (work, picked = [], buildEnv = {}, under = null, number = null) => ({
-  number, at: Date.now(), work, picked, buildEnv, under, buildOk: false, head: null, child: null, running: null, done: false, bad: null,
+  number, at: Date.now(), work, picked, buildEnv, under, buildOk: false, head: null, kids: new Set(), done: false, bad: null,
   prs: picked.map((n) => ({ number: n, title: state.prs.find((p) => p.number === n)?.title ?? '' })), stages: makeStages(state.config),
 });
 
 const deploying = () => (state?.deploy && !state.deploy.done ? state.deploy : null);
-const building = () => !!state && state.build !== deploying() && !!state.build.child;
+const building = () => !!state && state.build !== deploying() && state.build.kids.size > 0;
 // The next build can start once the newest one has its batch (its commit to stack on), even while its checks run.
 const batching = () => building() && !state.build.head;
-const children = () => [...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])].map((r) => r?.child).filter(Boolean);
+const kids = (runs) => runs.flatMap((r) => (r ? [...r.kids] : []));
+// A stage that just exited can still be listed until its close event, so a failed kill must not skip the others.
+const stop = (cs) => { for (const c of cs) try { process.kill(-c.pid, 'SIGTERM'); } catch {} };
+const children = () => kids([...new Set([state?.build, ...(state?.queue ?? []), state?.deploy])]);
 const inFlight = () => [deploying(), ...(state?.queue ?? [])].filter(Boolean);
 const saveRecord = () => writeFileSync(state.recordFile, JSON.stringify(state.record, null, 1));
 
@@ -152,14 +157,14 @@ function capture(cmd, args, cwd) {
 function runStage(run, stage, extraArgs, env) {
   return new Promise((res) => {
     Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
-    run.running = stage.id;
     send({ type: 'reset', stage: stage.id });
     send({ type: 'state', state: view() });
     const args = extraArgs.map((a) => ` ${a}`).join('');
-    const child = run.child = spawn('bash', ['-c', stage.run + args], {
+    const child = spawn('bash', ['-c', stage.run + args], {
       cwd: run.work, detached: true,
       env: { ...process.env, ...env, ...stage.env, PIPELINE_WORK: run.work, PIPELINE_BRANCH: state.config.branch, FORCE_COLOR: '0', CI: '1' },
     });
+    run.kids.add(child);
     let partial = '';
     const onData = (d) => {
       const lines = (partial + d).split(/\r?\n/);
@@ -171,11 +176,10 @@ function runStage(run, stage, extraArgs, env) {
     child.on('error', (e) => addLine(stage, `Could not start: ${e.message}`));
     child.on('close', (code, signal) => {
       if (partial) addLine(stage, partial);
-      run.child = null;
+      run.kids.delete(child);
       const ok = code === 0;
       for (const s of stage.steps) if (s.status === 'running') s.status = ok ? 'passed' : 'failed';
       Object.assign(stage, { status: ok ? 'passed' : signal ? 'stopped' : 'failed', ended: Date.now() });
-      run.running = null;
       // A stage's steps are only known once it prints them, so remember a full run's steps to show before the next.
       if (ok) { (state.record.steps ??= {})[stage.name] = [...new Set(stage.steps.map((t) => t.name.replace(/#\d+/g, '#N')))]; saveRecord(); }
       send({ type: 'state', state: view() });
@@ -199,6 +203,19 @@ function addLine(stage, raw) {
   stage.log.push(line);
   if (stage.log.length > MAX_LOG) stage.log.splice(0, stage.log.length - MAX_LOG);
   send({ type: 'log', stage: stage.id, line });
+}
+
+// Runs stages in order. A "parallel" stage starts with the one before it; the next stage waits for all of them.
+// Stops after the first group with a stage that did not pass, once that whole group has finished.
+async function runStages(run, stages, env) {
+  for (let i = 0; i < stages.length;) {
+    let j = i + 1;
+    while (stages[j]?.parallel) j++;
+    const oks = await Promise.all(stages.slice(i, j).map((s) => runStage(run, s, [], env)));
+    if (oks.includes(false)) return false;
+    i = j;
+  }
+  return true;
 }
 
 function ensureWorktree(work) {
@@ -227,7 +244,7 @@ async function build(picked, env) {
     // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
     refreshStagesFromBatch(run);
     send({ type: 'state', state: view(true) });
-    for (const s of run.stages.filter((s) => s.group === 'build' && s.id !== 'batch')) if (!(ok = await runStage(run, s, [], env))) break;
+    ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env);
   }
   if (!ok) drop(run, 'failed its build'); // and every build stacked on it while its checks ran
   else if (under?.bad || under?.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) run.bad ??= `Build #${under.number} under it did not make it, so build again.`;
@@ -268,7 +285,7 @@ async function rollback(to, env) {
     if (ok) refreshStagesFromBatch(run); // that commit's own stages
     run.stages = run.stages.filter((s) => s.id !== 'merge');
     send({ type: 'state', state: view(true) });
-    for (const s of run.stages.slice(1)) if (ok && !(ok = await runStage(run, s, [], env))) break;
+    if (ok) await runStages(run, run.stages.slice(1), env);
   } finally {
     run.done = true;
     if (run.stages.every((s) => s.status === 'passed')) {
@@ -302,12 +319,12 @@ async function deploy(run, from = 'merge') {
   state.deploy = run;
   Object.assign(run, { buildOk: false, done: false }); // one deploy per green build
   try {
+    // A retry skips stages that already passed beside the failed one, so a parallel peer does not run twice.
     const stages = run.stages.filter((s) => s.group === 'deploy');
-    for (const s of stages.slice(stages.findIndex((s) => s.id === from))) {
-      if (await runStage(run, s, [], run.buildEnv)) continue;
-      if (s.id === 'merge') drop(run, 'did not merge'); // never deploy a build stacked on one that did not merge
-      break;
-    }
+    const todo = stages.slice(stages.findIndex((s) => s.id === from)).filter((s) => from === 'merge' || s.status !== 'passed');
+    await runStages(run, todo, run.buildEnv);
+    // Never deploy a build stacked on one that did not merge.
+    if (run.stages.find((s) => s.id === 'merge')?.status !== 'passed') drop(run, 'did not merge');
   } finally {
     run.done = true;
     if (run.stages.every((s) => s.group !== 'deploy' || s.status === 'passed')) {
@@ -425,7 +442,7 @@ const server = http.createServer(async (req, res) => {
         break;
       case '/api/stop':
         // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.
-        for (const c of b.lane === 'build' ? [state.build, ...state.queue].filter((r) => r !== deploying()).map((r) => r.child) : b.lane === 'deploy' ? [deploying()?.child] : children()) if (c) process.kill(-c.pid, 'SIGTERM');
+        stop(b.lane === 'build' ? kids([state.build, ...state.queue].filter((r) => r !== deploying())) : b.lane === 'deploy' ? kids([deploying()]) : children());
         break;
       default: return json(res, 404, { error: 'No such action.' });
     }
@@ -447,6 +464,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   });
   // Closing the window stops a running stage too, rather than leaving a deploy running unseen.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { for (const c of children()) process.kill(-c.pid, 'SIGTERM'); process.exit(1); });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { stop(children()); process.exit(1); });
   server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${PORT} is busy. Is the pipeline already open? Try ${`http://localhost:${PORT}/`}` : e.message); process.exit(1); });
 }

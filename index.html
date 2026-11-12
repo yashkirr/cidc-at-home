@@ -80,9 +80,11 @@
   .queue li .btn { margin-left: auto; min-height: 28px; padding: 0 8px; font-size: 12px; }
   .live { border-color: color-mix(in srgb, var(--pass) 45%, var(--line)); }
   .live .prs-in { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .par { flex: 1 1 0; min-width: 150px; max-width: 240px; display: flex; flex-direction: column; gap: 8px; }
+  .par > .node { max-width: none; flex: 1 0 auto; }
   .arrow { align-self: center; color: var(--muted); flex: none; padding: 0 6px; }
   .arrow svg { width: 16px; height: 16px; display: block; }
-  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node { max-width: none; } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
+  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node, .par { max-width: none; } .par { padding-left: 10px; border-left: 2px solid var(--line); } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
   .steps { margin: 0; padding: 0; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
   .steps > .todo { color: var(--muted); }
   .steps > span { display: flex; gap: 6px; align-items: center; }
@@ -255,7 +257,10 @@ function draw() {
       <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
       <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
     </div>`;
-  $('flow').innerHTML = [queueNode, ...build.map((s) => stageCard(s, num)), gateNode, ...deploy.map((s) => stageCard(s, state.deployRow)), liveNode].join(arrow);
+  // Stages that run at the same time ("parallel" in pipeline.json) stack in one column.
+  const cards = (list, n) => list.reduce((cols, s) => (s.parallel && cols.length ? cols.at(-1).push(s) : cols.push([s]), cols), [])
+    .map((col) => (col.length > 1 ? `<div class="par" role="group" aria-label="Run at the same time">${col.map((s) => stageCard(s, n)).join('')}</div>` : stageCard(col[0], n)));
+  $('flow').innerHTML = [queueNode, ...cards(build, num), gateNode, ...cards(deploy, state.deployRow), liveNode].join(arrow);
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
 
@@ -316,7 +321,9 @@ new EventSource('/events').onmessage = (e) => {
     if (!state && m.state) { picked = new Set(m.state.picked); selected = m.state.retry ?? selected; } // a new tab shows the batch already built, or the failed stage's log
     state = m.state; if (state) repos = state.repos;
     for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
-    const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id));
+    // A stage that starts beside the one you are watching ("parallel", same lane) leaves that log open.
+    const at = (id) => state.stages.find((s) => s.id === id);
+    const started = (state?.running ?? []).filter((id) => !wasRunning.includes(id) && !(at(id)?.parallel && state.running.includes(selected) && at(selected)?.group === at(id).group));
     if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
     wasRunning = state?.running ?? [];
     render();
