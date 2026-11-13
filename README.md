@@ -56,6 +56,18 @@ step under the stage, so `echo "== Lint"` gives you a "Lint" step with its own t
 
 Full reference: [docs/pipeline-json.md](docs/pipeline-json.md). Ready-made setups: [examples/](examples/).
 
+## Let Claude fix failures
+
+Claude Code can read the pipeline and act on it, so you don't copy logs into the chat. Add it once:
+
+```sh
+claude mcp add cicd -- node /path/to/cidc-at-home/mcp.mjs
+```
+
+Then, in Claude Code in your app's repo, say "the batch failed, fix it". Claude sees which PRs clash or which check
+failed, reads the log, fixes the PR branch, pushes, and builds again. Its tools: `pipeline_status`, `build_log`,
+`build`, `retry_stage` and `resume_queue`. It can't deploy or roll back: those stay a click on the page.
+
 ## Docs
 
 - [Getting started](docs/getting-started.md): install, first run, adding repos.
