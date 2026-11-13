@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
+const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']; // MCP versions this speaks; it only uses tools
 const TAIL = 300; // log lines per stage: enough for a clash or a failing test, small enough for Claude to read
 
 async function call(path, body = {}) {
@@ -15,9 +16,9 @@ async function call(path, body = {}) {
   let r;
   try { r = await fetch(`http://127.0.0.1:${app.port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': app.token }, body: JSON.stringify(body) }); }
   catch { throw new Error('The pipeline app is not running. Start it with ./start.sh.'); }
-  const out = await r.json();
-  if (r.status === 403) throw new Error('The pipeline app restarted or is a different one. Try again.');
-  if (!r.ok) throw new Error(out.error);
+  const out = await r.json().catch(() => ({}));
+  if (r.status === 403 && out.error === 'Not allowed.') throw new Error('The pipeline app restarted or is a different one. Try again.');
+  if (!r.ok) throw new Error(out.error ?? `The pipeline app answered ${r.status}. Is it running on port ${app.port}?`);
   return out;
 }
 
@@ -26,7 +27,7 @@ const tools = {
   pipeline_status: {
     description: 'What the pipeline is doing now: open PRs, the newest build and its stages (status and steps), the deploy queue, what is live in each environment, any error, and recent builds. Start here when a build or deploy failed. A failed "batch" stage means picked PRs clash; its steps name them.',
     inputSchema: { type: 'object', properties: {} },
-    run: async () => { const v = await call('/api/status'); return v && { ...v, builds: v.builds?.slice(-10) }; },
+    run: async () => { const v = await call('/api/status'); return v && { ...v, builds: v.builds?.slice(0, 10) }; },
   },
   build_log: {
     description: `Stages of one build from this run of the app, with the last ${TAIL} log lines of each. Use the build number from pipeline_status. Pass stage (its id or name) to get one stage only.`,
@@ -41,7 +42,8 @@ const tools = {
   build: {
     description: 'Start a build: main plus these PR numbers, merged and checked. Same as ticking them and pressing Build. Use it after fixing a clash or a failing check (push the fix to the PR branch first). It does not deploy.',
     inputSchema: { type: 'object', properties: { prs: { type: 'array', items: num, minItems: 1 } }, required: ['prs'] },
-    run: async ({ prs }) => { await call('/api/prs'); return call('/api/build', { prs }); }, // fresh PR list, so a PR opened since is pickable
+    // Fresh PR list first, so a PR opened since is pickable. If gh is down, the list the app has will do.
+    run: async ({ prs }) => { await call('/api/prs').catch(() => {}); return call('/api/build', { prs }); },
   },
   retry_stage: {
     description: 'Run the failed stage of the last deploy again, and the stages after it, on the same build. Nothing is merged again. Pass that deploy\'s build number (deployRow in pipeline_status). The queue stays paused until resume_queue.',
@@ -56,7 +58,7 @@ const tools = {
 };
 
 async function handle({ id, method, params }) {
-  if (method === 'initialize') return { protocolVersion: params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'cicd-at-home', version: '1.0.0' } };
+  if (method === 'initialize') return { protocolVersion: VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cicd-at-home', version: '1.0.0' } };
   if (method === 'ping') return {};
   if (method === 'tools/list') return { tools: Object.entries(tools).map(([name, { description, inputSchema }]) => ({ name, description, inputSchema })) };
   if (method === 'tools/call') {
@@ -72,7 +74,7 @@ async function handle({ id, method, params }) {
 for await (const line of createInterface({ input: process.stdin })) {
   if (!line.trim()) continue;
   let msg;
-  try { msg = JSON.parse(line); } catch { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }) + '\n'); continue; }
+  try { msg = JSON.parse(line); if (!msg || typeof msg !== 'object') throw 0; } catch { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }) + '\n'); continue; }
   const reply = (body) => msg.id !== undefined && process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, ...body }) + '\n');
   handle(msg).then((result) => reply({ result }), (e) => reply({ error: { code: e.code ?? -32603, message: e.message } }));
 }

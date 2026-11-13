@@ -46,7 +46,7 @@ esac
   const port = 43000 + Math.floor(Math.random() * 1000);
   const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, PIPELINE_PORT: String(port), PIPELINE_NO_OPEN: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   const base = `http://localhost:${port}`;
-  let server, token, events, state; // state: the latest from the event stream
+  let server, mcp, token, events, state; // state: the latest from the event stream
   const post = (p, b = {}) => fetch(base + p, { method: 'POST', headers: { 'x-token': token, 'content-type': 'application/json' }, body: JSON.stringify(b) });
   const start = async () => {
     server = spawn(process.execPath, [join(HERE, '..', 'server.mjs'), repo], { env, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -74,7 +74,7 @@ esac
     assert.equal(state.buildOk, false);
 
     // Claude's view (mcp.mjs): it finds the clash in the log and can start the next build itself.
-    const mcp = spawn(process.execPath, [join(HERE, '..', 'mcp.mjs')], { env, stdio: ['pipe', 'pipe', 'inherit'] });
+    mcp = spawn(process.execPath, [join(HERE, '..', 'mcp.mjs')], { env, stdio: ['pipe', 'pipe', 'inherit'] });
     const replies = new Map(); let mbuf = '';
     mcp.stdout.on('data', (d) => { mbuf += d; let i; while ((i = mbuf.indexOf('\n')) >= 0) { const m = JSON.parse(mbuf.slice(0, i)); mbuf = mbuf.slice(i + 1); replies.get(m.id)?.(m); } });
     let mid = 0;
@@ -221,6 +221,7 @@ esac
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
+    mcp?.kill();
   }
 });
 

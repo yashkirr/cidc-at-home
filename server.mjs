@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -480,8 +480,9 @@ const server = http.createServer(async (req, res) => {
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
         const busy = [...inFlight(), ...(building() ? [state.build] : [])];
         if (picked.some((n) => busy.some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is running, queued or deploying.');
-        // No profile sent (mcp.mjs): sign in like the newest build did.
-        build(picked, b.profile === undefined ? state.build?.buildEnv ?? {} : profileEnv(b.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+        // No profile sent (mcp.mjs): sign in like the last build from the page did, also after a restart.
+        if (b.profile !== undefined) { profileEnv(b.profile); state.record.profile = b.profile; saveRecord(); } // check before keeping it
+        build(picked, profileEnv(state.record.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
         break;
       }
       case '/api/deploy': {
@@ -532,9 +533,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (first) { try { openRepo(addRepo(first)); loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`)); } catch (e) { console.error(e.message); } }
   server.listen(PORT, '127.0.0.1', () => {
     // mcp.mjs reads the port and this run's token here. Only you can read it, like the page.
-    const mcpFile = join(HOME, 'mcp.json');
-    writeFileSync(mcpFile, JSON.stringify({ port: PORT, token: TOKEN }), { mode: 0o600 });
-    chmodSync(mcpFile, 0o600);
+    const tmp = join(HOME, `mcp.json.${process.pid}`);
+    writeFileSync(tmp, JSON.stringify({ port: PORT, token: TOKEN }), { mode: 0o600 });
+    renameSync(tmp, join(HOME, 'mcp.json'));
     const url = `http://localhost:${PORT}/`;
     console.log(`CI/CD at home: ${url} (keep this window open; close it to stop)`);
     if (!process.env.PIPELINE_NO_OPEN) {
