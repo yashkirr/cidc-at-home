@@ -10,6 +10,9 @@ Treat the page like a deploy key.
 - **Other websites can't drive it.** Every action needs a secret token that is made fresh each time the app starts
   and is only in the page it serves. Other sites can't read that page. The app also refuses requests whose `Host` is
   not `localhost` or `127.0.0.1` on its port, which stops DNS rebinding.
+- **Claude's key stays on your machine.** The app writes its port and token to `~/.cicd-at-home/mcp.json`, readable
+  only by you, so `mcp.mjs` (Claude Code's connection) can use the same actions as the page. It has no deploy or
+  rollback action. Anything running as you can read that file, the same as it can read your other sign-ins.
 - **No fork pull requests.** Only pull requests from branches in the same repo are listed. Fork pull requests would let
   anyone on GitHub run code on your machine.
 - **No drafts.** Draft pull requests can't be picked.

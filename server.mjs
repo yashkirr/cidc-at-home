@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -470,6 +470,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || req.headers['x-token'] !== TOKEN) return json(res, 403, { error: 'Not allowed.' });
     const b = await body(req);
     switch (url.pathname) {
+      case '/api/status': return json(res, 200, view()); // for mcp.mjs: Claude reads the pipeline
       case '/api/repo': openRepo(addRepo(String(b.path))); await loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`)); break;
       case '/api/prs': await loadPrs(); break;
       case '/api/build': {
@@ -479,7 +480,8 @@ const server = http.createServer(async (req, res) => {
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
         const busy = [...inFlight(), ...(building() ? [state.build] : [])];
         if (picked.some((n) => busy.some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is running, queued or deploying.');
-        build(picked, profileEnv(b.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+        // No profile sent (mcp.mjs): sign in like the newest build did.
+        build(picked, b.profile === undefined ? state.build?.buildEnv ?? {} : profileEnv(b.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
         break;
       }
       case '/api/deploy': {
@@ -529,6 +531,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const first = process.argv[2] ?? repos[0];
   if (first) { try { openRepo(addRepo(first)); loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`)); } catch (e) { console.error(e.message); } }
   server.listen(PORT, '127.0.0.1', () => {
+    // mcp.mjs reads the port and this run's token here. Only you can read it, like the page.
+    const mcpFile = join(HOME, 'mcp.json');
+    writeFileSync(mcpFile, JSON.stringify({ port: PORT, token: TOKEN }), { mode: 0o600 });
+    chmodSync(mcpFile, 0o600);
     const url = `http://localhost:${PORT}/`;
     console.log(`CI/CD at home: ${url} (keep this window open; close it to stop)`);
     if (!process.env.PIPELINE_NO_OPEN) {

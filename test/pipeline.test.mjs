@@ -73,7 +73,24 @@ esac
     assert.deepEqual(state.stages[0].steps.map((s) => s.status), ['passed', 'passed', 'failed', 'passed', 'failed', 'failed']);
     assert.equal(state.buildOk, false);
 
-    assert.equal((await post('/api/build', { prs: [1] })).status, 200);
+    // Claude's view (mcp.mjs): it finds the clash in the log and can start the next build itself.
+    const mcp = spawn(process.execPath, [join(HERE, '..', 'mcp.mjs')], { env, stdio: ['pipe', 'pipe', 'inherit'] });
+    const replies = new Map(); let mbuf = '';
+    mcp.stdout.on('data', (d) => { mbuf += d; let i; while ((i = mbuf.indexOf('\n')) >= 0) { const m = JSON.parse(mbuf.slice(0, i)); mbuf = mbuf.slice(i + 1); replies.get(m.id)?.(m); } });
+    let mid = 0;
+    const rpc = (method, params) => new Promise((res) => { replies.set(++mid, res); mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: mid, method, params }) + '\n'); });
+    const tool = async (name, args) => { const r = (await rpc('tools/call', { name, arguments: args })).result; return r.isError ? r.content[0].text : JSON.parse(r.content[0].text); };
+    assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18' })).result.serverInfo.name, 'cicd-at-home');
+    assert.deepEqual((await rpc('tools/list')).result.tools.map((t) => t.name), ['pipeline_status', 'build_log', 'build', 'retry_stage', 'resume_queue']);
+    const seen = await tool('pipeline_status', {});
+    assert.equal(seen.stages[0].status, 'failed');
+    const log = await tool('build_log', { build: seen.build.number, stage: 'batch' });
+    assert.match(log.stages[0].log.join('\n'), /PR #3 clashes/);
+    assert.match(await tool('build_log', { build: seen.build.number, stage: 'nope' }), /no stage "nope"/);
+    assert.match(await tool('retry_stage', { build: seen.build.number }), /Only a failed stage/);
+
+    assert.deepEqual(await tool('build', { prs: [1] }), { ok: true }, 'Claude builds again once the clash is gone');
+    mcp.kill();
     await until((s) => s.buildOk, 'green build');
     assert.deepEqual(state.stages.find((s) => s.name === 'Checks').steps.map((s) => [s.name, s.status]), [['Lint', 'passed'], ['Tests', 'passed']]);
 
