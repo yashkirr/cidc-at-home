@@ -8,13 +8,14 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']; // MCP versions this speaks; it only uses tools
+let agent = ''; // the MCP client's name and version, from initialize: the app's audit trail records it
 const TAIL = 300; // log lines per stage: enough for a clash or a failing test, small enough for Claude to read
 
 async function call(path, body = {}) {
   let app;
   try { app = JSON.parse(readFileSync(join(homedir(), '.cicd-at-home', 'mcp.json'), 'utf8')); } catch { throw new Error('The pipeline app is not running. Start it with ./start.sh.'); }
   let r;
-  try { r = await fetch(`http://127.0.0.1:${app.port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': app.token }, body: JSON.stringify(body) }); }
+  try { r = await fetch(`http://127.0.0.1:${app.port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': app.token, 'x-agent': agent }, body: JSON.stringify(body) }); }
   catch { throw new Error('The pipeline app is not running. Start it with ./start.sh.'); }
   const out = await r.json().catch(() => ({}));
   if (r.status === 403 && out.error === 'Not allowed.') throw new Error('The pipeline app restarted or is a different one. Try again.');
@@ -58,7 +59,10 @@ const tools = {
 };
 
 async function handle({ id, method, params }) {
-  if (method === 'initialize') return { protocolVersion: VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cicd-at-home', version: '1.0.0' } };
+  if (method === 'initialize') {
+    agent = [params?.clientInfo?.name, params?.clientInfo?.version].filter(Boolean).join(' ').replace(/[^\w .@/:()-]/g, '').slice(0, 80); // headers take plain text only
+    return { protocolVersion: VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : VERSIONS[0], capabilities: { tools: {} }, serverInfo: { name: 'cicd-at-home', version: '1.0.0' } };
+  }
   if (method === 'ping') return {};
   if (method === 'tools/list') return { tools: Object.entries(tools).map(([name, { description, inputSchema }]) => ({ name, description, inputSchema })) };
   if (method === 'tools/call') {

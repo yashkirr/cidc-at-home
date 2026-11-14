@@ -80,7 +80,7 @@ esac
     let mid = 0;
     const rpc = (method, params) => new Promise((res) => { replies.set(++mid, res); mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: mid, method, params }) + '\n'); });
     const tool = async (name, args) => { const r = (await rpc('tools/call', { name, arguments: args })).result; return r.isError ? r.content[0].text : JSON.parse(r.content[0].text); };
-    assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18' })).result.serverInfo.name, 'cicd-at-home');
+    assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18', clientInfo: { name: 'claude-code', version: '2.1' } })).result.serverInfo.name, 'cicd-at-home');
     assert.deepEqual((await rpc('tools/list')).result.tools.map((t) => t.name), ['pipeline_status', 'build_log', 'build', 'retry_stage', 'resume_queue']);
     const seen = await tool('pipeline_status', {});
     assert.equal(seen.stages[0].status, 'failed');
@@ -91,6 +91,17 @@ esac
 
     assert.deepEqual(await tool('build', { prs: [1] }), { ok: true }, 'Claude builds again once the clash is gone');
     mcp.kill();
+    // Audit trail: the agent's key can't deploy, and every call, refused ones too, is logged with the agent's name.
+    const agentKey = JSON.parse(sh(home, 'cat .cicd-at-home/mcp.json')).token;
+    assert.notEqual(agentKey, token, 'agents have their own key');
+    assert.equal((await fetch(base + '/api/deploy', { method: 'POST', headers: { 'x-token': agentKey, 'x-agent': 'rogue' } })).status, 403, 'agents can not deploy');
+    await until((s) => s.agentLog.at(-1)?.agent === 'rogue', 'refusal logged');
+    const audit = sh(home, 'cat .cicd-at-home/agent-log.jsonl').trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(audit.map((a) => [a.agent, a.action, a.ok]), [['claude-code 2.1', 'status', true], ['claude-code 2.1', 'build-log', true], ['claude-code 2.1', 'build-log', true],
+      ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['rogue', 'deploy', false]]);
+    assert.equal(audit[5].build, 2);
+    assert.equal(audit[6].refused, true);
+    await until((s) => s.builds.find((b) => b.number === 2)?.by === 'claude-code 2.1', 'build #2 marked as the agent\'s');
     await until((s) => s.buildOk, 'green build');
     assert.deepEqual(state.stages.find((s) => s.name === 'Checks').steps.map((s) => [s.name, s.status]), [['Lint', 'passed'], ['Tests', 'passed']]);
 

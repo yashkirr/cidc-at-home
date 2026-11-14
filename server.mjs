@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const HOME = join(homedir(), '.cicd-at-home');
 const PORT = Number(process.env.PIPELINE_PORT || 4321);
 const TOKEN = randomBytes(24).toString('hex');
+// Agents (mcp.mjs) get their own key, so the app can tell their calls from yours, log each one, and limit what they do.
+const AGENT_TOKEN = randomBytes(24).toString('hex');
 const MAX_LOG = 4000;
 const BOOT = Date.now(); // a page left open from an older server reloads itself when it sees a new one
 mkdirSync(HOME, { recursive: true });
@@ -23,6 +25,17 @@ mkdirSync(HOME, { recursive: true });
 const reposFile = join(HOME, 'repos.json');
 let repos = existsSync(reposFile) ? JSON.parse(readFileSync(reposFile, 'utf8')) : [];
 const saveRepos = () => writeFileSync(reposFile, JSON.stringify(repos, null, 1));
+
+// Audit trail: every call an agent makes, allowed or not, one JSON line each. Only appended to, never rewritten.
+const agentFile = join(HOME, 'agent-log.jsonl');
+// shortcut: reads the whole file at start for the last 100 entries; fine for years of use, tail it if it ever gets slow
+const agentLog = existsSync(agentFile) ? readFileSync(agentFile, 'utf8').split('\n').filter(Boolean).slice(-100).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
+function audit(entry) {
+  agentLog.push(entry);
+  if (agentLog.length > 100) agentLog.shift();
+  try { appendFileSync(agentFile, JSON.stringify(entry) + '\n', { mode: 0o600 }); } catch (e) { console.error(`Could not write the agent log: ${e.message}`); }
+  send({ type: 'agent', entry });
+}
 
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 function addRepo(path) {
@@ -66,8 +79,8 @@ const makeStages = (config) => [
   { id: 'merge', group: 'deploy', name: 'Merge on GitHub', run: `bash "${join(HERE, 'merge.sh')}"` },
   ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
-const newRun = (work, picked = [], buildEnv = {}, under = null, number = null) => ({
-  number, at: Date.now(), work, picked, buildEnv, under, buildOk: false, head: null, kids: new Set(), done: false, bad: null,
+const newRun = (work, picked = [], buildEnv = {}, under = null, number = null, by = null) => ({
+  number, at: Date.now(), by, work, picked, buildEnv, under, buildOk: false, head: null, kids: new Set(), done: false, bad: null,
   prs: picked.map((n) => ({ number: n, title: state.prs.find((p) => p.number === n)?.title ?? '' })), stages: makeStages(state.config),
 });
 
@@ -87,7 +100,7 @@ const saveDeploy = () => {
   const r = state?.deploy;
   if (!r) return;
   try {
-    writeFileSync(state.deployFile + '.tmp', JSON.stringify({ number: r.number, at: r.at, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
+    writeFileSync(state.deployFile + '.tmp', JSON.stringify({ number: r.number, at: r.at, by: r.by ?? null, work: r.work, picked: r.picked, buildEnv: r.buildEnv, head: r.head, prs: r.prs,
       rollbackOf: r.rollbackOf ?? null, live: !!r.live, deployedSha: r.deployedSha ?? null,
       stages: r.stages.map((s) => ({ id: s.id, status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, interrupted: !!s.interrupted, pid: s.status === 'running' ? s.pid : null })) }), { mode: 0o600 });
     renameSync(state.deployFile + '.tmp', state.deployFile);
@@ -114,7 +127,7 @@ function restoreDeploy() {
       }
       return st;
     });
-    Object.assign(run, { at: d.at, head: d.head, prs: d.prs, rollbackOf: d.rollbackOf, live: d.live, deployedSha: d.deployedSha, done: true });
+    Object.assign(run, { at: d.at, by: d.by ?? null, head: d.head, prs: d.prs, rollbackOf: d.rollbackOf, live: d.live, deployedSha: d.deployedSha, done: true });
     state.runs.set(run.number, run);
     return run;
   } catch (e) {
@@ -136,7 +149,7 @@ function status(r) {
 function history() {
   const live = state.record.live[state.config.environment]?.number;
   const all = new Map((state.record.builds ?? []).map((b) => [b.number, b]));
-  for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, status: status(r), deployedSha: r.deployedSha ?? null, rollbackOf: r.rollbackOf ?? null });
+  for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, by: r.by ?? null, status: status(r), deployedSha: r.deployedSha ?? null, rollbackOf: r.rollbackOf ?? null });
   return [...all.values()].map((b) => (b.status === 'live' && b.number !== live ? { ...b, status: 'replaced' } : b))
     .sort((a, b) => b.number - a.number).slice(0, 200); // shortcut: last 200 builds only, page it if you need more
 }
@@ -165,7 +178,7 @@ function view(withLogs = false) {
   const builds = history(), saved = JSON.stringify(builds);
   if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
-    builds, planned: state.record.steps ?? {},
+    builds, planned: state.record.steps ?? {}, agentLog,
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
@@ -298,11 +311,11 @@ function ensureWorktree(work) {
 // A new build is stacked on the last build in flight (queued or deploying), in a worktree none of them is using.
 // Once the one under it is merged, main has the same files as its tested commit, so it can go next without a rebuild.
 // A build still running its checks goes into the queue first: the new one is stacked on it, so it must deploy first.
-async function build(picked, env) {
+async function build(picked, env, by = null) {
   if (building() && !state.queue.includes(state.build)) state.queue.push(state.build);
   const under = inFlight().at(-1) ?? null;
   const work = freeWork();
-  const run = state.build = newRun(work, picked, env, under, state.record.next++);
+  const run = state.build = newRun(work, picked, env, under, state.record.next++, by);
   state.runs.set(run.number, run);
   saveRecord();
   state.error = null;
@@ -467,8 +480,16 @@ const server = http.createServer(async (req, res) => {
       req.on('close', () => clients.delete(res));
       return;
     }
-    if (req.method !== 'POST' || req.headers['x-token'] !== TOKEN) return json(res, 403, { error: 'Not allowed.' });
-    const b = await body(req);
+    // Self-reported by mcp.mjs (the MCP client's name), so it says which agent, not who. The key proves it came via mcp.mjs.
+    const agent = req.method === 'POST' && req.headers['x-token'] === AGENT_TOKEN ? String(req.headers['x-agent'] ?? '').replace(/[^\w .@/:()-]/g, '').slice(0, 80) || 'Unnamed agent' : null;
+    if (req.method !== 'POST' || (req.headers['x-token'] !== TOKEN && !agent)) return json(res, 403, { error: 'Not allowed.' });
+    let b = null, made = null;
+    if (agent) res.on('close', () => audit({ at: Date.now(), agent, repo: state?.name ?? null, action: url.pathname.replace('/api/', ''), args: b, ok: res.writableFinished && res.statusCode < 400, refused: res.statusCode === 403, error: res.agentError ?? null, build: made }));
+    b = await body(req);
+    // What agents can do: read, build, retry, resume. Deploy, rollback, stop, queue changes and repos stay clicks on the page.
+    if (agent && !(['/api/status', '/api/prs', '/api/build', '/api/build-log', '/api/retry'].includes(url.pathname) || (url.pathname === '/api/queue' && b.action === 'resume'))) {
+      return json(res, 403, { error: (res.agentError = "Agents can't do that. Deploy, rollback, stop and queue changes stay a click on the page.") });
+    }
     switch (url.pathname) {
       case '/api/status': return json(res, 200, view()); // for mcp.mjs: Claude reads the pipeline
       case '/api/repo': openRepo(addRepo(String(b.path))); await loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`)); break;
@@ -482,7 +503,9 @@ const server = http.createServer(async (req, res) => {
         if (picked.some((n) => busy.some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is running, queued or deploying.');
         // No profile sent (mcp.mjs): sign in like the last build from the page did, also after a restart.
         if (b.profile !== undefined) { profileEnv(b.profile); state.record.profile = b.profile; saveRecord(); } // check before keeping it
-        build(picked, profileEnv(state.record.profile)).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+        const before = state.build;
+        build(picked, profileEnv(state.record.profile), agent).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
+        if (state.build !== before) made = state.build.number; // numbered before build() first waits; unchanged if it failed first
         break;
       }
       case '/api/deploy': {
@@ -524,7 +547,7 @@ const server = http.createServer(async (req, res) => {
     }
     json(res, 200, { ok: true });
   } catch (e) {
-    json(res, 400, { error: e.message });
+    json(res, 400, { error: (res.agentError = e.message) });
   }
 });
 
@@ -534,7 +557,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   server.listen(PORT, '127.0.0.1', () => {
     // mcp.mjs reads the port and this run's token here. Only you can read it, like the page.
     const tmp = join(HOME, `mcp.json.${process.pid}`);
-    writeFileSync(tmp, JSON.stringify({ port: PORT, token: TOKEN }), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ port: PORT, token: AGENT_TOKEN }), { mode: 0o600 });
     renameSync(tmp, join(HOME, 'mcp.json'));
     const url = `http://localhost:${PORT}/`;
     console.log(`CI/CD at home: ${url} (keep this window open; close it to stop)`);

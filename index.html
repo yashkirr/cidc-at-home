@@ -111,6 +111,16 @@
   @media (max-width: 700px) { .hrow { grid-template-columns: 48px 1fr; } .hrow .what, .hrow time { grid-column: 2; } .hdetail { padding-left: 6px; } }
   .chip.queued, .chip.building, .chip.deploying { background: color-mix(in srgb, var(--run) 16%, transparent); }
   .chip.live, .chip.good { background: color-mix(in srgb, var(--pass) 16%, transparent); }
+  .agent { list-style: none; margin: 0; padding: 0; display: grid; }
+  .agent li { display: grid; grid-template-columns: 170px minmax(120px, 200px) 1fr auto; gap: 12px; align-items: baseline; padding: 8px 6px; border-top: 1px solid var(--line); font-size: 14px; }
+  .agent li:first-child { border-top: 0; }
+  #reads { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+  .agent li.empty { display: block; margin: 0; }
+  .agent li.read { color: var(--muted); }
+  .agent time, .agent .by { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .agent time { white-space: nowrap; }
+  .agent .why { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  @media (max-width: 700px) { .agent li { grid-template-columns: 1fr auto; } .agent time, .agent .by { grid-column: 1 / -1; } .agent .by { grid-row: 1; } .agent time { grid-row: 2; } }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -141,6 +151,10 @@
   <section class="panel full" aria-labelledby="buildsTitle">
     <h2 id="buildsTitle">All builds</h2>
     <ol class="history" id="history"></ol>
+  </section>
+  <section class="panel full" aria-labelledby="agentTitle">
+    <div class="bar first"><h2 id="agentTitle">Agent activity</h2><span class="grow"></span><label><input type="checkbox" id="reads"> Show reads</label></div>
+    <ol class="agent" id="agent"></ol>
   </section>
 </main>
 <script>
@@ -268,6 +282,7 @@ function draw() {
   $('stopDeploy').hidden = !state.deploying;
 
   drawHistory();
+  drawAgent();
   const sel = viewing ?? state.stages.find((s) => s.id === selected) ?? state.stages[0];
   // Retry sits above the log, named for the failed stage, so it shows even when another stage's log is open.
   const failed = state.stages.find((s) => s.id === state.retry);
@@ -289,13 +304,38 @@ function drawHistory() {
   $('history').innerHTML = state.builds.length ? state.builds.map((b) => `<li>
       <button class="hrow" data-build="${b.number}" aria-expanded="${openBuild === b.number}">
         <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + env : where[b.status] ?? b.status}</span></span>
-        <span class="what">${b.rollbackOf ? `Rollback to #${b.rollbackOf}: ` : ''}${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
+        <span class="what">${b.by ? `<span class="tag" title="Started by an agent">by ${esc(b.by)}</span> ` : ''}${b.rollbackOf ? `Rollback to #${b.rollbackOf}: ` : ''}${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
         <time>${new Date(b.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
       </button>
       ${openBuild === b.number ? `<div class="hdetail">${buildStages.length ? buildStages.map((s) => `<button class="btn" data-log="${s.id}">${icon(s.status)}${esc(s.name)}</button>`).join('') : '<span class="none">Logs are only kept while the app runs.</span>'}
         ${b.deployedSha && b.status !== 'live' ? `<button class="btn primary" data-rollback="${b.number}" ${state.deploying ? 'disabled' : ''}>Roll back ${env} to build #${b.number}</button>` : ''}</div>` : ''}
     </li>`).join('') : '<li class="empty">No builds yet.</li>';
 }
+// Agent activity: what agents did through mcp.mjs, newest first. Every call, reads too, is in ~/.cicd-at-home/agent-log.jsonl.
+const reads = ['status', 'build-log', 'prs'];
+function said(a) {
+  const n = a.args?.number;
+  switch (a.action) {
+    case 'status': return 'Read the pipeline';
+    case 'build-log': return `Read the log of build #${n}`;
+    case 'prs': return 'Refreshed the PR list';
+    case 'build': return `${a.ok ? (a.build ? `Started build #${a.build}` : 'Asked for a build') : 'Tried to build'}${a.args?.prs?.length ? ` with ${a.args.prs.map((x) => '#' + x).join(', ')}` : ''}`;
+    case 'retry': return `${a.ok ? 'Retried' : 'Tried to retry'} the failed stage of build #${n}`;
+    case 'queue': return a.args?.action === 'resume' ? `${a.ok ? 'Resumed' : 'Tried to resume'} the queue` : 'Tried to change the queue';
+    default: return `Tried to ${a.action}`;
+  }
+}
+function drawAgent() {
+  const list = (state?.agentLog ?? []).filter((a) => $('reads').checked || !reads.includes(a.action)).slice(-50).reverse();
+  $('agent').innerHTML = list.length ? list.map((a) => `<li class="${reads.includes(a.action) ? 'read' : ''}">
+      <time>${new Date(a.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
+      <span class="by">${esc(a.agent)}</span>
+      <span>${esc(said(a))}${a.error ? `<span class="why">${esc(a.error)}</span>` : ''}</span>
+      <span class="chip ${a.ok ? 'passed' : 'failed'}">${a.ok ? 'Done' : a.refused ? 'Refused' : 'Failed'}</span>
+    </li>`).join('') : `<li class="empty">${state?.agentLog?.length ? 'Only reads so far. Tick Show reads to see them.' : 'No agent has used the pipeline yet.'}</li>`;
+}
+$('reads').addEventListener('change', drawAgent);
+
 $('history').addEventListener('click', async (e) => {
   const rb = e.target.closest('[data-rollback]');
   if (rb) {
@@ -330,6 +370,9 @@ new EventSource('/events').onmessage = (e) => {
     if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
     wasRunning = state?.running ?? [];
     render();
+  } else if (m.type === 'agent' && state) {
+    state.agentLog = [...state.agentLog, m.entry].slice(-100);
+    drawAgent();
   } else if (m.type === 'reset') {
     logs[m.stage] = [];
     const s = state?.stages.find((x) => x.id === m.stage); if (s) s.log = logs[m.stage];
