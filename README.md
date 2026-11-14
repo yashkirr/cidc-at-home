@@ -68,6 +68,10 @@ Then, in Claude Code in your app's repo, say "the batch failed, fix it". Claude 
 failed, reads the log, fixes the PR branch, pushes, and builds again. Its tools: `pipeline_status`, `build_log`,
 `build`, `retry_stage` and `resume_queue`. It can't deploy or roll back: those stay a click on the page.
 
+Every call an agent makes, reads and refused ones too, is logged with the agent's name, the action, its arguments,
+the time and the result in `~/.cicd-at-home/agent-log.jsonl`. The page shows them under Agent activity, and builds an
+agent started are marked "by" it in All builds.
+
 ## Docs
 
 - [Getting started](docs/getting-started.md): install, first run, adding repos.

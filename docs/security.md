@@ -10,9 +10,16 @@ Treat the page like a deploy key.
 - **Other websites can't drive it.** Every action needs a secret token that is made fresh each time the app starts
   and is only in the page it serves. Other sites can't read that page. The app also refuses requests whose `Host` is
   not `localhost` or `127.0.0.1` on its port, which stops DNS rebinding.
-- **Claude's key stays on your machine.** The app writes its port and token to `~/.cicd-at-home/mcp.json`, readable
-  only by you, so `mcp.mjs` (Claude Code's connection) can use the same actions as the page. It has no deploy or
-  rollback action. Anything running as you can read that file, the same as it can read your other sign-ins.
+- **Agents get their own key.** The app writes its port and an agent-only token to `~/.cicd-at-home/mcp.json`,
+  readable only by you, for `mcp.mjs` (Claude Code's connection). That token can read the pipeline, build, retry a
+  failed stage and resume the queue. The app refuses anything else from it (deploy, rollback, stop, queue changes,
+  repos) and ignores an AWS profile it sends. This is a guardrail for agents that play by the rules, not a sandbox:
+  anything running as you, an agent's shell included, can open the page and use the page's token, and can read your
+  other sign-ins too.
+- **Agent audit trail.** Every call made with the agent token (everything through `mcp.mjs`), allowed or refused, is appended to
+  `~/.cicd-at-home/agent-log.jsonl` (readable only by you) and shown under Agent activity. The agent's name is what its
+  MCP client reports, so it says which tool acted, not proof of who. The log is plain text: anything running as you
+  could edit it.
 - **No fork pull requests.** Only pull requests from branches in the same repo are listed. Fork pull requests would let
   anyone on GitHub run code on your machine.
 - **No drafts.** Draft pull requests can't be picked.
