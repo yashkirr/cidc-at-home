@@ -319,7 +319,7 @@ function said(a) {
     case 'status': return 'Read the pipeline';
     case 'build-log': return `Read the log of build #${n}`;
     case 'prs': return 'Refreshed the PR list';
-    case 'build': return `${a.ok ? (a.build ? `Started build #${a.build}` : 'Asked for a build') : 'Tried to build'}${a.args?.prs?.length ? ` with ${a.args.prs.map((x) => '#' + x).join(', ')}` : ''}`;
+    case 'build': return `${a.ok ? (a.build ? `Started build #${a.build}` : 'Asked for a build') : 'Tried to build'}${Array.isArray(a.args?.prs) && a.args.prs.length ? ` with ${a.args.prs.map((x) => '#' + x).join(', ')}` : ''}`;
     case 'retry': return `${a.ok ? 'Retried' : 'Tried to retry'} the failed stage of build #${n}`;
     case 'queue': return a.args?.action === 'resume' ? `${a.ok ? 'Resumed' : 'Tried to resume'} the queue` : 'Tried to change the queue';
     default: return `Tried to ${a.action}`;

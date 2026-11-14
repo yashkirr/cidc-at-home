@@ -13,8 +13,10 @@ Treat the page like a deploy key.
 - **Agents get their own key.** The app writes its port and an agent-only token to `~/.cicd-at-home/mcp.json`,
   readable only by you, for `mcp.mjs` (Claude Code's connection). That token can read the pipeline, build, retry a
   failed stage and resume the queue. The app refuses anything else from it (deploy, rollback, stop, queue changes,
-  repos), whatever sends it. Anything running as you can read that file, the same as it can read your other sign-ins.
-- **Agent audit trail.** Every call made with the agent token, allowed or refused, is appended to
+  repos) and ignores an AWS profile it sends. This is a guardrail for agents that play by the rules, not a sandbox:
+  anything running as you, an agent's shell included, can open the page and use the page's token, and can read your
+  other sign-ins too.
+- **Agent audit trail.** Every call made with the agent token (everything through `mcp.mjs`), allowed or refused, is appended to
   `~/.cicd-at-home/agent-log.jsonl` (readable only by you) and shown under Agent activity. The agent's name is what its
   MCP client reports, so it says which tool acted, not proof of who. The log is plain text: anything running as you
   could edit it.

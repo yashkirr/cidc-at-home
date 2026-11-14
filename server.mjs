@@ -502,7 +502,8 @@ const server = http.createServer(async (req, res) => {
         const busy = [...inFlight(), ...(building() ? [state.build] : [])];
         if (picked.some((n) => busy.some((r) => r.picked.includes(n)))) throw new Error('That PR is already in a build that is running, queued or deploying.');
         // No profile sent (mcp.mjs): sign in like the last build from the page did, also after a restart.
-        if (b.profile !== undefined) { profileEnv(b.profile); state.record.profile = b.profile; saveRecord(); } // check before keeping it
+        // An agent can't pick the sign-in: deploys reuse the build's, so that stays yours.
+        if (b.profile !== undefined && !agent) { profileEnv(b.profile); state.record.profile = b.profile; saveRecord(); } // check before keeping it
         const before = state.build;
         build(picked, profileEnv(state.record.profile), agent).catch((e) => { state.error = e.message; send({ type: 'state', state: view() }); });
         if (state.build !== before) made = state.build.number; // numbered before build() first waits; unchanged if it failed first
