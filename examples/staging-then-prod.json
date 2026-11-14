@@ -1,0 +1,29 @@
+{
+  "branch": "main",
+  "environment": "prod",
+  "build": [
+    { "name": "Install", "run": "npm ci" },
+    { "name": "Checks", "run": "echo '== Lint' && npm run lint && echo '== Tests' && npm test" },
+    { "name": "Build", "run": "npm run build" }
+  ],
+  "deploy": [
+    { "name": "Deploy staging", "environment": "staging", "run": "aws s3 sync out/ \"s3://$BUCKET\" --delete", "env": { "BUCKET": "my-site-staging" } },
+    { "name": "Deploy prod", "run": "aws s3 sync out/ \"s3://$BUCKET\" --delete", "env": { "BUCKET": "my-site-prod" } }
+  ],
+  "environments": {
+    "staging": {
+      "bake": "15m",
+      "gates": [
+        { "alarms": ["staging-5xx", "staging-p99-latency"], "region": "eu-west-1" },
+        { "url": "https://staging.example.com/health" }
+      ]
+    },
+    "prod": {
+      "bake": "30m",
+      "gates": [{ "alarms": ["prod-5xx"], "region": "eu-west-1" }, { "run": "bash scripts/smoke.sh https://example.com" }],
+      "autoPromote": false,
+      "windows": [{ "days": "mon-fri", "from": "09:00", "to": "22:00" }],
+      "timezone": "Europe/London"
+    }
+  }
+}

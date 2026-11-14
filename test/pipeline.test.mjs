@@ -268,3 +268,117 @@ test('parallel is ignored on the first stage of a list, so nothing deploys besid
     rmSync(dir, { recursive: true });
   }
 });
+
+// Promotion: staging, then prod. Staging bakes while its gates (a CloudWatch alarm through a fake aws, and a command)
+// are checked; prod waits for a Promote click and for any block to come off. A gate that trips rolls staging back.
+test('staging bakes behind its gates, prod waits for promote and blocks, a tripped gate rolls back', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pipeline-promo-'));
+  const remote = join(tmp, 'remote.git'), repo = join(tmp, 'repo'), bin = join(tmp, 'bin'), home = join(tmp, 'home');
+  mkdirSync(bin); mkdirSync(home);
+  sh(tmp, `git init -q --bare -b main remote.git && git clone -q remote.git repo`);
+  writeFileSync(join(repo, 'pipeline.json'), JSON.stringify({
+    environment: 'prod',
+    build: [{ name: 'Checks', run: 'true' }],
+    deploy: [{ name: 'Staging', environment: 'staging', run: 'true' }, { name: 'Prod', run: 'echo "== Ship"; true' }],
+    environments: {
+      staging: { bake: '1s', gates: [{ alarms: ['stg-5xx'], region: 'eu-west-1' }, { run: `test ! -f "${join(tmp, 'sick')}"` }] },
+      prod: { autoPromote: false },
+    },
+  }));
+  sh(repo, `echo a > a.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm init && git push -q origin main`);
+  writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bash\ncase "$*" in *pulls\\?state=open*) echo '[]' ;; *) exit 1 ;; esac\n`);
+  // Fake AWS CLI: the alarm is in ALARM while the "alarm" file exists. Logs its arguments to check the region and profile.
+  writeFileSync(join(bin, 'aws'), `#!/usr/bin/env bash\necho "$* $AWS_PROFILE" >> "${join(tmp, 'aws-calls')}"\n[ -f "${join(tmp, 'alarm')}" ] && s=ALARM || s=OK\necho "{\\"m\\": [[\\"stg-5xx\\", \\"$s\\"]], \\"c\\": []}"\n`);
+  chmodSync(join(bin, 'gh'), 0o755); chmodSync(join(bin, 'aws'), 0o755);
+
+  const port = 44000 + Math.floor(Math.random() * 1000), base = `http://localhost:${port}`;
+  const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, PIPELINE_PORT: String(port), PIPELINE_NO_OPEN: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  const server = spawn(process.execPath, [join(HERE, '..', 'server.mjs'), repo], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+  let state, events;
+  try {
+    await new Promise((res) => server.stdout.once('data', res));
+    const token = (await (await fetch(base + '/')).text()).match(/const TOKEN = '(\w+)'/)[1];
+    const post = (p, b = {}) => fetch(base + p, { method: 'POST', headers: { 'x-token': token, 'content-type': 'application/json' }, body: JSON.stringify(b) });
+    events = await fetch(base + '/events');
+    (async () => { const dec = new TextDecoder(); let buf = '';
+      for await (const chunk of events.body) { buf += dec.decode(chunk); let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) { const m = JSON.parse(buf.slice(6, i)); buf = buf.slice(i + 2); if (m.type === 'state') state = m.state; } } })().catch(() => {});
+    const until = async (ok, what) => { for (let i = 0; i < 300; i++) { if (state && ok(state)) return; await new Promise((r) => setTimeout(r, 100)); } assert.fail(`timed out: ${what}; ${state?.error} ${JSON.stringify(state?.stages?.map((s) => [s.id, s.status, s.note, s.log?.slice(-2)]))}`); };
+    const stage = (id) => state.stages.find((s) => s.id === id);
+    await until((s) => s.config, 'state');
+    const ok = async (r) => { const j = await r.json(); assert.equal(r.status, 200, j.error); };
+    assert.deepEqual(state.stages.map((s) => s.id), ['batch', 'build0', 'merge', 'deploy0', 'gate-staging', 'deploy1', 'gate-prod']);
+    assert.deepEqual(state.lives.map((l) => l.environment), ['staging', 'prod'], 'staging first, in deploy order');
+
+    // Build #1 deploys on its own: staging, its bake and gates, then prod waits for a Promote click.
+    await ok(await post('/api/build', { prs: [] }));
+    await until((s) => s.promote?.environment === 'prod', 'prod waits for promote');
+    assert.equal(stage('gate-staging').status, 'passed');
+    assert.equal(stage('deploy1').status, 'held');
+    assert.equal(state.lives[0].live?.number, 1, 'staging is live before prod is promoted');
+    assert.equal(state.lives[1].live, null);
+    assert.match(sh(tmp, 'cat aws-calls'), /describe-alarms --alarm-names stg-5xx --region eu-west-1/);
+
+    // A block holds prod even once promoted, and says why.
+    assert.equal((await post('/api/block', { environment: 'prod', reason: '' })).status, 400, 'a block needs a reason');
+    assert.equal((await post('/api/block', { environment: 'nowhere', reason: 'x' })).status, 400);
+    assert.equal((await post('/api/block', { environment: 'prod', reason: 'Code freeze' })).status, 200);
+    assert.equal((await post('/api/promote', { number: 1, environment: 'staging' })).status, 400, 'nothing waits on staging');
+    assert.equal((await post('/api/promote', { number: 1, environment: 'prod' })).status, 200);
+    await until((s) => stage('deploy1').note === 'prod is blocked: Code freeze' && !s.promote, 'promoted, still blocked');
+    assert.equal((await post('/api/block', { environment: 'prod', action: 'unblock' })).status, 200);
+    await until((s) => s.lives[1].live?.number === 1 && !s.deploying, 'build #1 live in prod');
+    assert.deepEqual(state.stages.map((s) => s.status), ['passed', 'passed', 'passed', 'passed', 'passed', 'passed', 'passed']);
+
+    // Build #2: the staging alarm fires during the bake. Prod never runs, staging rolls back to #1 (as build #3), queue pauses.
+    writeFileSync(join(tmp, 'alarm'), '');
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.lives[0].live?.rollbackOf === 1 && !s.deploying, 'staging rolled back');
+    assert.equal(state.lives[0].live.number, 3);
+    assert.equal(state.lives[1].live.number, 1, 'prod keeps build #1');
+    assert.equal(state.paused, true);
+    assert.match(state.error, /^Build #2 failed its health gates in staging: CloudWatch alarm in ALARM: stg-5xx. Rolled staging back to build #1/);
+    const b2 = await (await post('/api/build-log', { number: 2 })).json();
+    assert.deepEqual(b2.stages.slice(2).map((s) => [s.id, s.status]), [['merge', 'passed'], ['deploy0', 'passed'], ['gate-staging', 'failed'], ['deploy1', 'waiting'], ['gate-prod', 'waiting']]);
+    assert.match(b2.stages[4].log.join('\n'), /!! CloudWatch alarm in ALARM: stg-5xx/);
+    const b3 = await (await post('/api/build-log', { number: 3 })).json();
+    assert.deepEqual(b3.stages.map((s) => s.id), ['batch', 'build0', 'deploy0'], 'a rollback reruns only staging, with no bake');
+  } finally {
+    events?.body.cancel().catch(() => {});
+    server.kill();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('environments in pipeline.json: gates, bake, windows, and when a window is open', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pipeline-env-')), home = process.env.HOME;
+  process.env.HOME = dir;
+  try {
+    const { readConfig, inWindow } = await import('../server.mjs');
+    const cfg = (environments, deploy = [{ name: 'D', run: 'd' }]) => { writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({ deploy, environments })); return readConfig(dir); };
+    assert.deepEqual(cfg(undefined).environments, {}, 'no environments: works as before');
+    const c = cfg({ prod: { bake: '2h', gates: [{ url: 'https://x.test/health' }], windows: [{ days: 'mon-fri', from: '09:00', to: '22:00' }], timezone: 'Europe/London' } }).environments.prod;
+    assert.equal(c.bake, 2 * 36e5);
+    assert.deepEqual(c.windows[0].days, ['mon', 'tue', 'wed', 'thu', 'fri']);
+    assert.equal(c.autoPromote, true);
+    assert.equal(c.rollback, true);
+    assert.throws(() => cfg({ staging: {} }), /no deploy stage makes it live/);
+    assert.throws(() => cfg({ prod: { bake: 'soon' } }), /bake is a time/);
+    assert.throws(() => cfg({ prod: { gates: [{ alarms: ['a'], region: 'mars' }] } }), /not an AWS region/);
+    assert.throws(() => cfg({ prod: { gates: [{ url: 'file:///etc/passwd' }] } }), /http or https/);
+    assert.throws(() => cfg({ prod: { gates: [{}] } }), /each gate is/);
+    assert.throws(() => cfg({ prod: { windows: [{ from: '9am', to: '22:00' }] } }), /like "09:00"/);
+    assert.throws(() => cfg({ prod: { timezone: 'Mars/Base' } }), /not a time zone/);
+    // Wed 2026-11-11 in UTC.
+    const w = (from, to, days = 'sun-sat') => ({ windows: [{ from, to, days: cfg({ prod: { windows: [{ from, to, days }] } }).environments.prod.windows[0].days }], timezone: 'UTC' });
+    assert.equal(inWindow(w('09:00', '22:00'), new Date('2026-11-11T21:59:00Z')), true);
+    assert.equal(inWindow(w('09:00', '22:00'), new Date('2026-11-11T22:00:00Z')), false, 'no prod deploys after 10 PM');
+    assert.equal(inWindow(w('09:00', '22:00', 'sat-sun'), new Date('2026-11-11T12:00:00Z')), false, 'not on a Wednesday');
+    assert.equal(inWindow(w('22:00', '06:00', 'tue'), new Date('2026-11-11T05:00:00Z')), true, 'Tuesday night runs into Wednesday morning');
+    assert.equal(inWindow(w('22:00', '06:00', 'wed'), new Date('2026-11-11T05:00:00Z')), false);
+    assert.equal(inWindow({ windows: [] }), true);
+  } finally {
+    process.env.HOME = home;
+    rmSync(dir, { recursive: true });
+  }
+});
