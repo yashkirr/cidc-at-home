@@ -239,7 +239,7 @@ function stageCard(s, build) {
   return `<button class="node stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
     <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : ''}${s.environment && s.environment !== state.config.environment ? `<span class="none">to ${esc(s.environment)}</span>` : ''}</span>
-    <span class="time">${took(s)}</span>
+    <span class="time">${esc(took(s))}</span>
     <span class="under steps">${stepList(s)}</span>
   </button>`;
 }

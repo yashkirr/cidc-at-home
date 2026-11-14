@@ -187,7 +187,7 @@ function restoreDeploy() {
     // A newer build used its folder since: nothing there to retry, and its pipeline.json is not this build's.
     if (git(String(d.work), 'rev-parse', 'HEAD^{tree}') !== git(String(d.work), 'rev-parse', `${d.head}^{tree}`)) return null;
     const run = newRun(String(d.work), d.picked.map(Number), profileEnv(d.buildEnv?.AWS_PROFILE), null, Number(d.number));
-    const byId = new Map(makeStages(readConfig(run.work)).map((s) => [s.id, s]));
+    const byId = new Map(makeStages(pinned(readConfig(run.work))).map((s) => [s.id, s]));
     run.stages = d.stages.filter((s) => byId.has(s.id)).map((s) => {
       const st = { ...byId.get(s.id), status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, interrupted: !!s.interrupted };
       if (st.status === 'running' || st.status === 'held') {
@@ -549,12 +549,13 @@ async function build(picked, env, by = null) {
   pump();
 }
 
+const pinned = (c) => ({ ...c, branch: state.config.branch, autoDeploy: state.config.autoDeploy,
+  environments: Object.fromEntries(Object.entries(state.config.environments).filter(([e]) => c.deploy.some((s) => s.environment === e))) });
 function refreshStagesFromBatch(run) {
   // branch, autoDeploy and environments (approvals, gates, windows) come from your checkout when the repo opens, never
   // from a batch: a PR can't switch on its own deploy or drop the checks on it. Stages for an environment the batch no
   // longer deploys to get no gate.
-  const c = readConfig(run.work), envs = state.config.environments;
-  state.config = { ...c, branch: state.config.branch, autoDeploy: state.config.autoDeploy, environments: Object.fromEntries(Object.entries(envs).filter(([e]) => c.deploy.some((s) => s.environment === e))) };
+  state.config = pinned(readConfig(run.work));
   const [batch] = run.stages;
   run.stages = [batch, ...makeStages(state.config).slice(1)];
 }
