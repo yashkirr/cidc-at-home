@@ -54,6 +54,11 @@ Put this at the root of each repo you want to build and deploy:
 Each stage is a shell command. It passes when it exits with 0. Any line it prints that starts with `== ` shows up as a
 step under the stage, so `echo "== Lint"` gives you a "Lint" step with its own tick.
 
+Want staging before prod, a bake time, CloudWatch alarms as health gates with automatic rollback, a Promote button,
+deploy hours or a code-freeze block? Add `environments`: see
+[Promotion](docs/pipeline-json.md#promotion-staging-bake-time-and-health-gates) and
+[examples/staging-then-prod.json](examples/staging-then-prod.json).
+
 ### Resuming a retried stage
 
 Retry runs a failed deploy stage's whole command again. If its first steps can't run twice (say `terraform apply
