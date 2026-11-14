@@ -16,7 +16,7 @@ Nothing else. No database: the app keeps the current run in memory, and the list
 ## Build
 
 ```
-Batch PRs  ->  your build stages  ->  (Deploy unlocks)
+Batch PRs  ->  your build stages  ->  (deploys on its own)
 ```
 
 **Batch PRs** (`batch.sh`) works in a private copy of your repo, a git worktree in `~/.cicd-at-home/work/`. Your own
@@ -29,7 +29,7 @@ working copy is never touched, so you can keep coding while a build runs.
    pull request that did not fit. Nothing is left out for you: you untick them and build again.
 3. Write `.pipeline-batch`: the branch's commit, then each pull request with the exact commit that was merged.
 
-Then your **build stages** run, one after another, in the batch. Every stage must pass for Deploy to unlock.
+Then your **build stages** run, one after another, in the batch. Every stage must pass, then the build deploys on its own (or, with `"autoDeploy": false`, the **Deploy** button unlocks).
 
 ## Deploy
 

@@ -22,7 +22,8 @@
 | `branch` | no, default `main` | The branch you release from. Builds start from it, and pull requests into it are listed. |
 | `environment` | no, default `prod` | A name for where deploys go ("Deploy to prod", "Live in prod"). Deploy stages make this environment live unless they name their own. |
 | `build` | no | Stages run by the **Build** button, in order. |
-| `deploy` | no | Stages run by the **Deploy** button, in order. |
+| `deploy` | no | Stages run after a build passes, in order. |
+| `autoDeploy` | no, default `true` | Every build joins the queue as its batch is ready and deploys on its own once every build stage passes, after the builds in front. Builds Claude starts deploy too. Take a build off the queue to stop it going out. `false`: a **Deploy** button instead, pressed once per green build. Read from your checkout when the app opens the repo (like `branch`), so a pull request can't change it: restart the app after changing it. |
 
 Each stage:
 

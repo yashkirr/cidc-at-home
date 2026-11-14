@@ -248,6 +248,7 @@ function draw() {
   const place = state.queue.findIndex((b) => b.number === num) + 1;
   const gate = state.queued ? `Build #${num} is number ${place} in the queue. It deploys on its own${busy ? ' once it passes' : ''}${place > 1 || state.deploying ? ', after the builds in front' : ''}.`
     : state.build.bad ? esc(state.build.bad)
+    : state.config.autoDeploy && !(state.buildOk && !state.queued) ? (state.deploying ? 'Deploying. You can build the next batch now.' : 'Every build deploys on its own once its stages pass.')
     : state.buildOk && queue ? `Build #${num} passed. Queue it to deploy after the builds in front.`
     : busy ? `Queue build #${num} now to deploy as soon as it passes.`
     : state.buildOk ? `Build #${num} passed. This ` + merged
@@ -266,7 +267,7 @@ function draw() {
     </div>`;
   const gateNode = `<div class="node gate" role="group" aria-label="Deploy">
       <span class="top">Deploy to ${env}</span>
-      ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'}</button>`}
+      ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : state.config.autoDeploy && !state.buildOk ? '' : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'}</button>`}
       <p>${gate}</p>
     </div>`;
   // One card per environment the deploy makes live (pipeline.json "environment"), stacked like parallel stages.

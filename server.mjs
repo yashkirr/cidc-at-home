@@ -70,7 +70,8 @@ export function readConfig(dir) {
   const branch = c.branch ?? 'main';
   if (!/^\w[\w./-]*$/.test(branch)) throw new Error('pipeline.json: branch is not a valid branch name.');
   const environment = typeof c.environment === 'string' && c.environment.trim() ? c.environment : 'prod';
-  return { branch, environment, build: stages(c.build), deploy: stages(c.deploy, environment) };
+  if (c.autoDeploy != null && typeof c.autoDeploy !== 'boolean') throw new Error('pipeline.json: autoDeploy is true or false.');
+  return { branch, environment, autoDeploy: c.autoDeploy !== false, build: stages(c.build), deploy: stages(c.deploy, environment) };
 }
 
 // One pipeline state for the open repo. Stages: batch, build stages, (gate), merge, deploy stages.
@@ -189,7 +190,7 @@ function view(withLogs = false) {
   return {
     builds, planned: state.record.steps ?? {},
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
-    config: { branch: state.config.branch, environment: state.config.environment },
+    config: { branch: state.config.branch, environment: state.config.environment, autoDeploy: state.config.autoDeploy },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
     live: state.record.live[state.config.environment] ?? null,
@@ -345,18 +346,28 @@ async function build(picked, env, by = null) {
     send({ type: 'state', state: view() });
     // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
     refreshStagesFromBatch(run);
+    // Unless your pipeline.json says "autoDeploy": false, it is queued now, so it deploys on its own once green. Before any
+    // newer build can start (that waits for this batch), so the queue keeps build order.
+    if (state.config.autoDeploy && !state.queue.includes(run)) state.queue.push(run);
     send({ type: 'state', state: view(true) });
-    ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env);
+    // A queued build that threw would sit at the head of the queue forever: count it as failed instead.
+    ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env).catch((e) => {
+      state.error = e.message;
+      for (const s of run.stages) if (s.status === 'running') s.status = 'failed';
+      return false;
+    });
   }
   if (!ok) drop(run, 'failed its build'); // and every build stacked on it while its checks ran
   else if (under?.bad || under?.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) run.bad ??= `Build #${under.number} under it did not make it, so build again.`;
   else if (!run.bad) run.buildOk = true;
+  if (run.bad) drop(run, 'was dropped'); // a queued bad build must not hold up the ones behind it
   send({ type: 'state', state: view(true) });
   pump();
 }
 
 function refreshStagesFromBatch(run) {
-  state.config = { ...readConfig(run.work), branch: state.config.branch };
+  // branch and autoDeploy come from your checkout when the repo opens, never from a batch: a PR can't switch on its own deploy.
+  state.config = { ...readConfig(run.work), branch: state.config.branch, autoDeploy: state.config.autoDeploy };
   const [batch] = run.stages;
   run.stages = [batch, ...makeStages(state.config).slice(1)];
 }
@@ -435,9 +446,10 @@ async function deploy(run, from = 'merge') {
       run.live = true;
       run.deployedSha = git(run.work, 'rev-parse', 'HEAD'); // main's commit after the merge: what a rollback redeploys
       if (missed.length) state.error = `Build #${run.number} is live in ${state.config.environment}, but not in ${missed.join(', ')}. Open its failed stage to retry it.`;
-    } else if (state.queue.length) {
+    } else if (state.queue.length || state.config.autoDeploy) {
       // A deploy that did not make the pipeline's own environment live holds the queue: you look first, then resume it.
-      // Another environment failing (say TestFlight) does not: the next deploy ships it again.
+      // Another environment failing (say TestFlight) does not: the next deploy ships it again. With autoDeploy it pauses
+      // even with nothing queued, so the next build waits for you instead of shipping past the failure.
       state.paused = true;
       state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
     }

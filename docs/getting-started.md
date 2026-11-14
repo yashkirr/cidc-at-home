@@ -48,7 +48,8 @@ Click any stage to see its log. A failed stage shows which step failed, and the 
 
 ## Deploy
 
-When every build stage is green, **Deploy** unlocks. Press it and confirm. The app then:
+When every build stage is green, the build deploys on its own. (With `"autoDeploy": false` in pipeline.json,
+**Deploy** unlocks instead: press it and confirm.) The app then:
 
 1. merges the ticked pull requests on GitHub, in the order they were built,
 2. checks that GitHub's main now has exactly the files that were tested,
