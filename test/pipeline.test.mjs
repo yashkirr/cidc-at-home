@@ -21,10 +21,10 @@ test('build a batch with a PR, then deploy merges it and runs the deploy stages'
     // Checks wait for checkgate, so the test can start a build while the one before is still checking.
     build: [{ name: 'Checks', run: `echo "== Lint"; until [ -f "${join(tmp, 'checkgate')}" ]; do sleep 0.1; done; echo ok; echo "== Tests"; test -f a.txt && test -f pr.txt` }],
     // Waits for the test to open the gate, so the next batch is built while this deploy is still running.
-    deploy: [{ name: 'Release', run: `echo "== Upload"; until [ -f "${join(tmp, 'gate')}" ]; do sleep 0.1; done; if [ -f "${join(tmp, 'failonce')}" ]; then rm "${join(tmp, 'failonce')}"; exit 1; fi; echo "$WHO" > deployed.txt`, env: { WHO: 'me' } },
+    deploy: [{ name: 'Release', run: `grep -qx Prep <<< "$CICD_PASSED_STEPS" || echo "== Prep"; echo "$CICD_RESUME_FROM" > "${join(tmp, 'resume')}"; echo "== Upload"; until [ -f "${join(tmp, 'gate')}" ]; do sleep 0.1; done; if [ -f "${join(tmp, 'failonce')}" ]; then rm "${join(tmp, 'failonce')}"; exit 1; fi; echo "$WHO" > deployed.txt`, env: { WHO: 'me' } },
       // Starts together with Release, so it is done while Release still waits at the gate. Counts its runs for the retry check.
       // Its own environment ("store"): it goes live there on its own. failapp makes it fail once.
-      { name: 'App', parallel: true, environment: 'store', run: `echo "== Send"; echo app > app.txt; echo x >> "${join(tmp, 'app-runs')}"; if [ -f "${join(tmp, 'failapp')}" ]; then rm "${join(tmp, 'failapp')}"; exit 1; fi` }],
+      { name: 'App', parallel: true, environment: 'store', run: `echo "== Pack"; echo "== Send"; echo app > app.txt; echo x >> "${join(tmp, 'app-runs')}"; if [ -f "${join(tmp, 'failapp')}" ]; then rm "${join(tmp, 'failapp')}"; exit 1; fi` }],
   }));
   sh(repo, `echo a > a.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm init && git push -q origin main
     git checkout -qb pr && echo pr > pr.txt && git add -A && git -c user.name=t -c user.email=t@t commit -qm pr && git push -q origin pr:refs/pull/1/head
@@ -211,6 +211,9 @@ esac
     assert.equal(sh(tmp, 'git --git-dir=remote.git rev-list --count main'), merges, 'no new merge');
     assert.equal(sh(tmp, 'wc -l < app-runs'), appRuns, 'App passed beside the failed Release, so the retry does not run it again');
     assert.deepEqual((await (await post('/api/build-log', { number: 8 })).json()).stages.map((s) => s.status), ['passed', 'passed', 'passed', 'passed', 'passed']);
+    // Prep passed before Upload failed, so the retry was told to start at Upload, and shows Prep as skipped.
+    assert.equal(sh(tmp, 'cat resume'), 'Upload\n');
+    assert.deepEqual(state.stages.find((s) => s.id === 'deploy0').steps, [{ name: 'Prep', status: 'skipped' }, { name: 'Upload', status: 'passed' }]);
 
     // Each environment goes live on its own. App ("store") fails: build #9 is live in test anyway, the queue does not
     // pause, store keeps build #8, and Retry runs just App.
@@ -228,6 +231,8 @@ esac
     assert.equal((await post('/api/retry', { number: 9 })).status, 200);
     await until((s) => s.lives[1].live.number === 9 && !s.deploying, 'App passes on retry: store has #9');
     assert.equal(state.live.at, at, 'live in test since the first deploy');
+    // App ignores the resume variables and runs Pack again: it shows as run, not skipped.
+    assert.deepEqual(state.stages.find((s) => s.id === 'deploy1').steps.map((t) => t.status), ['passed', 'passed']);
     assert.equal(state.retry, null);
     events.body.cancel().catch(() => {});
   } finally {
