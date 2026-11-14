@@ -109,7 +109,7 @@ The page shows a **Bake staging** stage after staging's stages, and a **Promote 
 | `gates` | none | Health checks, below. One failed check fails the bake. |
 | `rollback` | `true` | When a gate fails, roll this environment back to the build that was live there before, then pause the queue. `false`: only pause. |
 | `autoPromote` | `true` | `false`: a build waits before this environment until you press **Promote** on the page. Before the first environment, that wait comes before the merge. |
-| `windows` | any time | When builds may go into this environment. Outside them, a build waits at the door. `days` is like `"mon-fri"`, `"sat-sun"` or `"wed"` (default every day); `from` and `to` are 24-hour times. A window can run past midnight (`"22:00"` to `"06:00"`). |
+| `windows` | any time | When builds may go into this environment. Outside them, a build waits at the door. `days` is like `"mon-fri"`, `"sat,sun"` or `"mon-wed,fri"` (default every day); `from` and `to` are 24-hour times. A window can run past midnight (`"22:00"` to `"06:00"`). |
 | `timezone` | your machine's | The time zone for `windows`, like `"Europe/London"`. |
 
 Each gate is one of:
@@ -122,8 +122,13 @@ Each gate is one of:
 
 A single failed check fails the gate. If you want retries or thresholds, write them in a `run` gate.
 
+A check that can't run (the AWS sign-in ran out, the AWS CLI is missing, an alarm name has a typo) also stops the
+promotion, but rolls nothing back: it says nothing about the app's health. Fix it, then **Retry** the bake stage. The
+Live card shows the build as "health not checked" meanwhile.
+
 **What happens when a gate fails:** the stages after it don't run, and that environment is rolled back to the build
-that was live in it before (if there was one): a new build marked "rollback to #N", which rebuilds that build's commit
+that was live in it before (if there was one; if not, or with `"rollback": false`, the build stays and its Live
+card shows it failed its health gates): a new build marked "rollback to #N", which rebuilds that build's commit
 and runs only that environment's deploy stages, with no bake and no waits. Other environments keep what they have. The
 queue pauses, as for any rollback: revert the bad change on GitHub, then **Resume queue**.
 
@@ -133,6 +138,10 @@ restarts. A block, a deploy window or a Promote wait holds the deploy lane, so t
 Rollbacks are not held.
 
 Agents (`mcp.mjs`) can't promote, block or unblock: those stay clicks on the page.
+
+A pull request can't loosen these rules: `environments` comes from your own checkout, and while it has any, a build
+whose pipeline.json deploys to a different set of environments (say it renames `prod`) is refused. Merge such a change
+by hand, then restart the app.
 
 ## Steps
 

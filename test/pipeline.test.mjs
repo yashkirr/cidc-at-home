@@ -317,7 +317,7 @@ test('staging bakes behind its gates, prod waits for promote and blocks, a tripp
     assert.equal(stage('deploy1').status, 'held');
     assert.equal(state.lives[0].live?.number, 1, 'staging is live before prod is promoted');
     assert.equal(state.lives[1].live, null);
-    assert.match(sh(tmp, 'cat aws-calls'), /describe-alarms --alarm-names stg-5xx --region eu-west-1/);
+    assert.match(sh(tmp, 'cat aws-calls'), /describe-alarms --alarm-types MetricAlarm CompositeAlarm --alarm-names stg-5xx --region eu-west-1/);
 
     // A block holds prod even once promoted, and says why.
     assert.equal((await post('/api/block', { environment: 'prod', reason: '' })).status, 400, 'a block needs a reason');
@@ -341,8 +341,30 @@ test('staging bakes behind its gates, prod waits for promote and blocks, a tripp
     const b2 = await (await post('/api/build-log', { number: 2 })).json();
     assert.deepEqual(b2.stages.slice(2).map((s) => [s.id, s.status]), [['merge', 'passed'], ['deploy0', 'passed'], ['gate-staging', 'failed'], ['deploy1', 'waiting'], ['gate-prod', 'waiting']]);
     assert.match(b2.stages[4].log.join('\n'), /!! CloudWatch alarm in ALARM: stg-5xx/);
+    assert.equal(state.builds.find((b) => b.number === 3).status, 'live', 'the rollback is live in staging');
     const b3 = await (await post('/api/build-log', { number: 3 })).json();
     assert.deepEqual(b3.stages.map((s) => s.id), ['batch', 'build0', 'deploy0'], 'a rollback reruns only staging, with no bake');
+
+    // The AWS sign-in runs out: the check broke, the app didn't, so the gate fails without a rollback.
+    rmSync(join(tmp, 'alarm'));
+    writeFileSync(join(bin, 'aws'), '#!/usr/bin/env bash\necho "The SSO session has expired" >&2; exit 255\n');
+    await ok(await post('/api/queue', { action: 'resume' }));
+    await ok(await post('/api/build', { prs: [] }));
+    await until((s) => s.deployRow === 4 && !s.deploying && s.paused, 'build #4 stops at the staging gate');
+    assert.equal(stage('gate-staging').status, 'failed');
+    assert.equal(state.retry, 'gate-staging', 'Retry the check once signed in');
+    assert.equal(state.lives[0].live.number, 4, 'build #4 is what runs in staging now');
+    assert.equal(state.lives[0].live.health, 'broke', 'shown as not checked');
+    assert.match(state.error, /^Build #4 could not be checked in staging: Could not read the CloudWatch alarms: The SSO session has expired. Nothing was rolled back/);
+    assert.equal(state.builds.find((b) => b.number === 5), undefined, 'no rollback build');
+
+    // A pull request can't rename its environment to get past the rules set for it in your checkout.
+    sh(repo, `sed -i 's/"staging"/"stage"/g' pipeline.json && git -c user.name=t -c user.email=t@t commit -qam rename && git push -q origin main`);
+    await ok(await post('/api/queue', { action: 'resume' }));
+    await ok(await post('/api/build', { prs: [] }));
+    await until((s) => s.build.number === 5 && s.build.status === 'bad', 'build #5 refused');
+    assert.match(state.build.bad, /deploys to prod, stage, but yours deploys to prod, staging/);
+    assert.equal(state.deployRow, 4, 'nothing deployed');
   } finally {
     events?.body.cancel().catch(() => {});
     server.kill();
@@ -369,6 +391,12 @@ test('environments in pipeline.json: gates, bake, windows, and when a window is 
     assert.throws(() => cfg({ prod: { gates: [{}] } }), /each gate is/);
     assert.throws(() => cfg({ prod: { windows: [{ from: '9am', to: '22:00' }] } }), /like "09:00"/);
     assert.throws(() => cfg({ prod: { timezone: 'Mars/Base' } }), /not a time zone/);
+    const days = (d) => cfg({ prod: { windows: [{ days: d, from: '09:00', to: '17:00' }] } }).environments.prod.windows[0].days;
+    assert.deepEqual(days('mon,wed,fri'), ['mon', 'wed', 'fri']);
+    assert.deepEqual(days(['sat', 'sun']), ['sun', 'sat']);
+    assert.deepEqual(days('fri-mon'), ['sun', 'mon', 'fri', 'sat'], 'a range can wrap the weekend');
+    assert.throws(() => days('mon-wed-fri'), /window days/);
+    assert.throws(() => days('someday'), /window days/);
     // Wed 2026-11-11 in UTC.
     const w = (from, to, days = 'sun-sat') => ({ windows: [{ from, to, days: cfg({ prod: { windows: [{ from, to, days }] } }).environments.prod.windows[0].days }], timezone: 'UTC' });
     assert.equal(inWindow(w('09:00', '22:00'), new Date('2026-11-11T21:59:00Z')), true);

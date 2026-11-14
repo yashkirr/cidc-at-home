@@ -321,8 +321,8 @@ function draw() {
   const liveCard = ({ environment, live: l }) => {
     const blk = state.blocks[environment], e = esc(environment);
     return `<div class="node live ${blk ? 'isblocked' : ''}" role="group" aria-label="Live in ${e}">
-      <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${e}</span>
-      <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
+      <span class="top">${l ? icon(l.health ? 'failed' : 'passed') : icon('waiting')}Live in ${e}</span>
+      <span class="who">${l ? `<span class="chip ${l.health ? 'failed' : 'passed'}">Build #${l.number}</span>${l.health ? `<span class="none">${l.health === 'sick' ? 'failed its health gates' : 'health not checked'}</span>` : ''}${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
       <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
       <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
       ${rules(environment)}
@@ -373,7 +373,7 @@ function drawHistory() {
   const env = esc(state.config.environment);
   $('history').innerHTML = state.builds.length ? state.builds.map((b) => `<li>
       <button class="hrow" data-build="${b.number}" aria-expanded="${openBuild === b.number}">
-        <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + env : where[b.status] ?? b.status}</span></span>
+        <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + esc(state.lives.filter((l) => l.live?.number === b.number).map((l) => l.environment).join(', ') || state.config.environment) : where[b.status] ?? b.status}</span></span>
         <span class="what">${b.by ? `<span class="tag" title="Started by an agent">by ${esc(b.by)}</span> ` : ''}${b.rollbackOf ? `Rollback to #${b.rollbackOf}: ` : ''}${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
         <time>${new Date(b.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
       </button>

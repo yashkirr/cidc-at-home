@@ -108,9 +108,14 @@ function promotions(list, deploy) {
     });
     const windows = (Array.isArray(e.windows) ? e.windows : e.windows == null ? [] : [null]).map((w) => {
       const t = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v ?? '') ? v : (() => { throw bad('windows need "from" and "to" like "09:00".'); })();
-      const [a, b = a] = String(w?.days ?? 'sun-sat').toLowerCase().split('-').map((d) => DAYS.indexOf(d.trim().slice(0, 3)));
-      if (a < 0 || b < 0) throw bad('window days are like "mon-fri" or "sat".');
-      return { from: t(w?.from), to: t(w?.to), days: DAYS.filter((_, i) => (a <= b ? i >= a && i <= b : i >= a || i <= b)) };
+      // "mon-fri", "sat,sun", "mon-wed,fri" or a list of those.
+      const days = new Set(String(w?.days ?? 'sun-sat').toLowerCase().split(',').flatMap((part) => {
+        const ends = part.split('-').map((d) => DAYS.indexOf(d.trim().slice(0, 3)) + (/^[a-z]{3,9}$/.test(d.trim()) ? 0 : -99));
+        const [a, b = a] = ends;
+        if (ends.length > 2 || a < 0 || b < 0) throw bad('window days are like "mon-fri", "sat,sun" or "wed".');
+        return DAYS.filter((_, i) => (a <= b ? i >= a && i <= b : i >= a || i <= b));
+      }));
+      return { from: t(w?.from), to: t(w?.to), days: DAYS.filter((d) => days.has(d)) };
     });
     if (e.timezone != null) try { new Intl.DateTimeFormat('en', { timeZone: e.timezone }); } catch { throw bad(`"${e.timezone}" is not a time zone.`); }
     return [name, { bake: ms(e.bake, `environments.${name}.bake`), gates, autoPromote: e.autoPromote !== false, rollback: e.rollback !== false, windows, timezone: e.timezone ?? null }];
@@ -210,7 +215,8 @@ function restoreDeploy() {
 
 function status(r) {
   if (r === deploying()) return 'deploying';
-  if (r.live) return 'live';
+  // A rollback of one environment (a failed gate) counts as live once it is live there.
+  if (r.live || (r.rollbackOf && Object.values(state.record.live).some((l) => l.number === r.number))) return 'live';
   if (r.done) return 'failed';
   if (r.bad || r.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) return 'bad';
   if (state.queue.includes(r)) return 'queued';
@@ -219,10 +225,10 @@ function status(r) {
 // Every build there has been, newest first: this run's builds from memory, older ones as saved. Where a build is
 // (queued, deploying, live, replaced...) comes from the live runs; a build in flight when the app stopped is 'stopped'.
 function history() {
-  const live = state.record.live[state.config.environment]?.number;
+  const live = new Set(Object.values(state.record.live).map((l) => l.number));
   const all = new Map((state.record.builds ?? []).map((b) => [b.number, b]));
   for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, by: r.by ?? null, status: status(r), deployedSha: r.deployedSha ?? null, rollbackOf: r.rollbackOf ?? null });
-  return [...all.values()].map((b) => (b.status === 'live' && b.number !== live ? { ...b, status: 'replaced' } : b))
+  return [...all.values()].map((b) => (b.status === 'live' && !live.has(b.number) ? { ...b, status: 'replaced' } : b))
     .sort((a, b) => b.number - a.number).slice(0, 200); // shortcut: last 200 builds only, page it if you need more
 }
 const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad, building: r.stages.some((s) => s.group === 'build' && s.status === 'running') };
@@ -235,7 +241,7 @@ function openRepo(dir) {
   // Build numbers and what is live, kept between runs of the app.
   const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : { next: 1, live: {} };
   record.builds = (record.builds ?? []).map((b) => (['new', 'building', 'good', 'queued', 'deploying'].includes(b.status) ? { ...b, status: 'stopped' } : b));
-  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, deployFile, runs: new Map(), saved: '' };
+  state = { repo: dir, name: basename(dir), work, config, pins: config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, deployFile, runs: new Map(), saved: '' };
   state.build = newRun(work);
   state.deploy = restoreDeploy();
   send({ type: 'state', state: view() });
@@ -248,6 +254,7 @@ function view(withLogs = false) {
   const b = state.build, dep = deploying(), d = dep ?? (b.buildOk && !state.queue.length ? b : state.deploy ?? b);
   const stages = [...b.stages.filter((s) => s.group === 'build'), ...d.stages.filter((s) => s.group === 'deploy')];
   const builds = history(), saved = JSON.stringify(builds);
+  const wait = dep?.stages.find((s) => s.status === 'held' && state.config.environments[envOf(s)]?.autoPromote === false && !dep.approved?.has(envOf(s)));
   if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
     builds, planned: state.record.steps ?? {},
@@ -255,7 +262,7 @@ function view(withLogs = false) {
     config: { branch: state.config.branch, environment: state.config.environment, autoDeploy: state.config.autoDeploy, environments: state.config.environments },
     blocks: state.record.blocks ?? {},
     // A deploy held before an environment you promote into by hand, not promoted yet (a block may hold it too).
-    promote: (({ e } = {}) => e && { number: dep.number, environment: e })(dep?.stages.filter((s) => s.status === 'held').map((s) => ({ e: envOf(s) })).find(({ e }) => state.config.environments[e]?.autoPromote === false && !dep.approved?.has(e))) || null,
+    promote: wait ? { number: dep.number, environment: envOf(wait) } : null,
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
     live: state.record.live[state.config.environment] ?? null,
@@ -414,11 +421,12 @@ async function hold(run, group, envs) {
 // shortcut: a single failed check fails it, no retries or thresholds; put those in a "run" gate if you need them.
 async function runGate(run, s) {
   const e = s.gate, c = state.config.environments[e];
-  Object.assign(s, { ...fresh, status: 'running', steps: [], log: [], started: Date.now(), tripped: false });
+  Object.assign(s, { ...fresh, status: 'running', steps: [], log: [], started: Date.now(), verdict: null });
   send({ type: 'reset', stage: s.id });
-  const end = (ok, tripped = false) => {
+  // verdict: 'sick' (a gate says the environment is unhealthy) or 'broke' (a check could not run).
+  const end = (ok, verdict = null) => {
     for (const t of s.steps) if (t.status === 'running') t.status = ok ? 'passed' : 'failed';
-    Object.assign(s, { status: ok ? 'passed' : run.halt ? 'stopped' : 'failed', ended: Date.now(), tripped });
+    Object.assign(s, { status: ok ? 'passed' : run.halt ? 'stopped' : 'failed', ended: Date.now(), verdict });
     saveDeploy();
     send({ type: 'state', state: view() });
     return ok;
@@ -434,7 +442,12 @@ async function runGate(run, s) {
     for (const g of c.gates) {
       const fail = await check(run, s, g);
       if (run.halt) return end(false);
-      if (fail) { addLine(s, `!! ${fail}`); return end(false, true); }
+      // Unhealthy: roll back. Couldn't check (sign-in ran out, no aws, a typo): stop here, but leave it be.
+      if (fail) {
+        addLine(s, `!! ${fail.why}`);
+        if (!fail.sick) addLine(s, 'That is a problem with the check, not a sign the app is unhealthy, so nothing is rolled back. Fix it, then Retry this stage.');
+        return end(false, fail.sick ? 'sick' : 'broke');
+      }
     }
     const left = until - Date.now();
     if (left <= 0) break;
@@ -446,33 +459,34 @@ async function runGate(run, s) {
 }
 const mins = (t) => (t >= 6e4 ? `${Math.round(t / 6e4)} min` : `${Math.round(t / 1e3)} s`);
 
-// One gate check. Returns why it failed, or null. AWS goes through the AWS CLI with the build's sign-in: your default
+// One gate check. Returns null, or { why, sick }: sick when the environment looks unhealthy, not when the check broke. AWS goes through the AWS CLI with the build's sign-in: your default
 // credential chain, or the AWS profile the build used. No keys are stored here.
 async function check(run, s, g) {
   const at = new Date().toLocaleTimeString();
   if (g.alarms) {
-    const r = await probe(run, 'aws', ['cloudwatch', 'describe-alarms', '--alarm-names', ...g.alarms, ...(g.region ? ['--region', g.region] : []), '--output', 'json',
+    const r = await probe(run, 'aws', ['cloudwatch', 'describe-alarms', '--alarm-types', 'MetricAlarm', 'CompositeAlarm', '--alarm-names', ...g.alarms, ...(g.region ? ['--region', g.region] : []), '--output', 'json',
       '--query', '{m: MetricAlarms[].[AlarmName, StateValue], c: CompositeAlarms[].[AlarmName, StateValue]}']);
-    if (!r.ok) return `Could not read the CloudWatch alarms: ${r.out.trim().split('\n').at(-1) || 'aws failed'}`;
+    if (!r.ok) return { why: `Could not read the CloudWatch alarms: ${r.out.trim().split('\n').at(-1) || 'aws failed'}` };
     let found;
-    try { const j = JSON.parse(r.out); found = new Map([...(j.m ?? []), ...(j.c ?? [])]); } catch { return 'The AWS CLI answer was not JSON.'; }
+    try { const j = JSON.parse(r.out); found = new Map([...(j.m ?? []), ...(j.c ?? [])]); } catch { return { why: 'The AWS CLI answer was not JSON.' }; }
     const missing = g.alarms.filter((a) => !found.has(a)), firing = g.alarms.filter((a) => found.get(a) === 'ALARM');
-    if (missing.length) return `No CloudWatch alarm named ${missing.join(', ')}${g.region ? ` in ${g.region}` : ''}.`;
-    if (firing.length) return `CloudWatch alarm in ALARM: ${firing.join(', ')}.`;
+    if (missing.length) return { why: `No CloudWatch alarm named ${missing.join(', ')}${g.region ? ` in ${g.region}` : ''}.` };
+    if (firing.length) return { why: `CloudWatch alarm in ALARM: ${firing.join(', ')}.`, sick: true };
     addLine(s, `${at} alarms OK: ${g.alarms.map((a) => `${a} (${found.get(a)})`).join(', ')}`);
     return null;
   }
   if (g.url) {
     try {
       const r = await fetch(g.url, { signal: AbortSignal.timeout(10000), redirect: 'manual' });
-      if (r.status < 200 || r.status >= 400) return `${g.url} answered ${r.status}.`;
+      r.body?.cancel().catch(() => {}); // only the status matters; let the connection go
+      if (r.status < 200 || r.status >= 400) return { why: `${g.url} answered ${r.status}.`, sick: true };
       addLine(s, `${at} ${g.url} answered ${r.status}`);
       return null;
-    } catch (err) { return `${g.url} did not answer: ${err.cause?.code ?? err.message}.`; }
+    } catch (err) { return { why: `${g.url} did not answer: ${err.cause?.code ?? err.message}.`, sick: true }; }
   }
   const r = await probe(run, 'bash', ['-c', g.run]);
   for (const l of r.out.trim().split('\n').filter(Boolean).slice(-5)) addLine(s, l.replace(/^(==|!!) /, ''));
-  return r.ok ? (addLine(s, `${at} "${g.run}" passed`), null) : `"${g.run}" failed.`;
+  return r.ok ? (addLine(s, `${at} "${g.run}" passed`), null) : { why: `"${g.run}" failed.`, sick: true };
 }
 // Runs a gate's command in the build's folder with the build's sign-in, as a stage would. Stop stops it. 2 min limit.
 function probe(run, cmd, args) {
@@ -529,13 +543,13 @@ async function build(picked, env, by = null) {
     run.head = git(run.work, 'rev-parse', 'HEAD'); // what the next build stacks on
     send({ type: 'state', state: view() });
     // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
-    refreshStagesFromBatch(run);
+    try { refreshStagesFromBatch(run, true); } catch (e) { run.bad = state.error = e.message; ok = false; }
     // Unless your pipeline.json says "autoDeploy": false, it is queued now, so it deploys on its own once green. Before any
     // newer build can start (that waits for this batch), so the queue keeps build order.
-    if (state.config.autoDeploy && !state.queue.includes(run)) state.queue.push(run);
+    if (ok && state.config.autoDeploy && !state.queue.includes(run)) state.queue.push(run);
     send({ type: 'state', state: view(true) });
     // A queued build that threw would sit at the head of the queue forever: count it as failed instead.
-    ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env).catch((e) => {
+    if (ok) ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env).catch((e) => {
       state.error = e.message;
       for (const s of run.stages) if (s.status === 'running') s.status = 'failed';
       return false;
@@ -549,13 +563,20 @@ async function build(picked, env, by = null) {
   pump();
 }
 
-const pinned = (c) => ({ ...c, branch: state.config.branch, autoDeploy: state.config.autoDeploy,
-  environments: Object.fromEntries(Object.entries(state.config.environments).filter(([e]) => c.deploy.some((s) => s.environment === e))) });
-function refreshStagesFromBatch(run) {
+// strict (builds): with promotion rules in your checkout, a batch must deploy to the same environments, so a PR can't
+// rename prod to dodge its gates. A rollback rebuilds an older commit as it was, so it is not held to that.
+function pinned(c, strict = false) {
+  const p = state.pins, envs = (x) => [...new Set(x.deploy.map((s) => s.environment))].sort().join(', ');
+  if (strict && Object.keys(p.environments).length && envs(c) !== envs(p)) {
+    throw new Error(`This batch's pipeline.json deploys to ${envs(c) || 'nothing'}, but yours deploys to ${envs(p)}. Environments with promotion rules can't change in a pull request: merge it by hand, restart the app, then build.`);
+  }
+  return { ...c, branch: p.branch, autoDeploy: p.autoDeploy, environments: Object.fromEntries(Object.entries(p.environments).filter(([e]) => c.deploy.some((s) => s.environment === e))) };
+}
+function refreshStagesFromBatch(run, strict = false) {
   // branch, autoDeploy and environments (approvals, gates, windows) come from your checkout when the repo opens, never
   // from a batch: a PR can't switch on its own deploy or drop the checks on it. Stages for an environment the batch no
   // longer deploys to get no gate.
-  state.config = pinned(readConfig(run.work));
+  state.config = pinned(readConfig(run.work), strict);
   const [batch] = run.stages;
   run.stages = [batch, ...makeStages(state.config).slice(1)];
 }
@@ -647,19 +668,23 @@ async function deploy(run, from = 'merge') {
       state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
     }
     // A failed health gate rolls its environment back to the build live there before, like Amazon's pipelines do.
-    // Through the usual rollback, so the queue stays paused until you resume it.
-    const g = run.stages.find((s) => s.gate && s.tripped), prev = g && state.record.live[g.gate];
-    const sha = prev && (prev.sha ?? history().find((b) => b.number === prev.number)?.deployedSha);
+    // Through the usual rollback, so the queue stays paused until you resume it. A check that could not run, rollback
+    // off, or nothing live there before: the build stays, and its Live card says it failed or was not checked.
+    const g = run.stages.find((s) => s.gate && s.verdict), prev = g && state.record.live[g.gate];
+    const sha = prev && prev.number !== run.number && (prev.sha ?? history().find((b) => b.number === prev.number)?.deployedSha);
+    const back = g?.verdict === 'sick' && state.config.environments[g.gate]?.rollback && sha;
     if (g) {
       state.paused = true;
-      state.error = `Build #${run.number} failed its health gates in ${g.gate}: ${g.log.findLast((l) => l.startsWith('!! '))?.slice(3) ?? 'see its log.'}`;
-      if (!state.config.environments[g.gate]?.rollback) state.error += ' Rollback is off for it, so nothing was rolled back.';
-      else if (!sha || prev.number === run.number) state.error += ` Nothing was live in ${g.gate} before, so there is nothing to roll back to.`;
+      const why = (g.log.findLast((l) => l.startsWith('!! '))?.slice(3) ?? 'see its log').replace(/([^.])$/, '$1.');
+      state.error = g.verdict === 'broke' ? `Build #${run.number} could not be checked in ${g.gate}: ${why} Nothing was rolled back. Fix the check, then retry ${g.name}.`
+        : `Build #${run.number} failed its health gates in ${g.gate}: ${why}${back ? '' : state.config.environments[g.gate]?.rollback ? ` Nothing was live in ${g.gate} before, so there is nothing to roll back to.` : ' Rollback is off for it, so it is still there.'}`;
+      if (!back) {
+        state.record.live[g.gate] = { number: run.number, prs: run.prs, at: Date.now(), sha: git(run.work, 'rev-parse', 'HEAD'), health: g.verdict };
+        saveRecord();
+      }
     }
     saveDeploy();
-    if (g && sha && prev.number !== run.number && state.config.environments[g.gate]?.rollback) {
-      rollback(prev.number, run.buildEnv, [g.gate], sha, `${state.error} `).catch((e) => { state.error += ` The rollback could not start: ${e.message}`; send({ type: 'state', state: view() }); });
-    }
+    if (back) rollback(prev.number, run.buildEnv, [g.gate], sha, `${state.error} `).catch((e) => { state.error += ` The rollback could not start: ${e.message}`; send({ type: 'state', state: view() }); });
     send({ type: 'state', state: view(true) });
     loadPrs().catch(() => {}); // merged PRs drop off the list
     pump();
@@ -790,7 +815,7 @@ const server = http.createServer(async (req, res) => {
       case '/api/promote': {
         // Lets a build into an environment that has "autoPromote": false. Only the deploy waiting there; a block or
         // deploy window can still hold it after that.
-        const p = view().promote;
+        const p = view()?.promote;
         if (!p || p.number !== Number(b.number) || p.environment !== b.environment) throw new Error('Nothing is waiting to be promoted there.');
         (deploying().approved ??= new Set()).add(p.environment);
         wake();
