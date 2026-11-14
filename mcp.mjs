@@ -41,7 +41,7 @@ const tools = {
     },
   },
   build: {
-    description: 'Start a build: main plus these PR numbers, merged and checked. Same as ticking them and pressing Build. Use it after fixing a clash or a failing check (push the fix to the PR branch first). It does not deploy.',
+    description: 'Start a build: main plus these PR numbers, merged and checked. Same as ticking them and pressing Build. Use it after fixing a clash or a failing check (push the fix to the PR branch first). Once every check passes it deploys on its own (unless the repo\'s pipeline.json sets "autoDeploy": false), so only build what should go live.',
     inputSchema: { type: 'object', properties: { prs: { type: 'array', items: num, minItems: 1 } }, required: ['prs'] },
     // Fresh PR list first, so a PR opened since is pickable. If gh is down, the list the app has will do.
     run: async ({ prs }) => { await call('/api/prs').catch(() => {}); return call('/api/build', { prs }); },

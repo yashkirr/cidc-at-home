@@ -6,7 +6,7 @@ It is a small web page that does two things:
 
 1. **Build** (one click). It takes your main branch, merges in the open pull requests you tick, and runs your
    checks on the result: lint, tests, build, whatever your repo needs. You watch every stage and step pass or fail.
-2. **Deploy** (one click, only after a green build). It merges those pull requests on GitHub, checks that main now
+2. **Deploy** (on its own once a build is green; `"autoDeploy": false` gives you a button instead). It merges those pull requests on GitHub, checks that main now
    has exactly the code that was tested, then runs your deploy steps. While it deploys, you can already build the
    next batch, stacked on the one going out, so it is ready to deploy the moment this one finishes.
 
@@ -86,7 +86,8 @@ claude mcp add cicd -- node /path/to/cidc-at-home/mcp.mjs
 
 Then, in Claude Code in your app's repo, say "the batch failed, fix it". Claude sees which PRs clash or which check
 failed, reads the log, fixes the PR branch, pushes, and builds again. Its tools: `pipeline_status`, `build_log`,
-`build`, `retry_stage` and `resume_queue`. It can't deploy or roll back: those stay a click on the page.
+`build`, `retry_stage` and `resume_queue`. A build it starts deploys on its own once green, like any build (unless
+pipeline.json sets `"autoDeploy": false`). It can't roll back, stop or change the queue: those stay a click on the page.
 
 Every call an agent makes, reads and refused ones too, is logged with the agent's name, the action, its arguments,
 the time and the result in `~/.cicd-at-home/agent-log.jsonl`. The page shows them under Agent activity, and builds an

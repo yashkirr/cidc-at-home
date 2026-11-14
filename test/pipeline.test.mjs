@@ -17,7 +17,7 @@ test('build a batch with a PR, then deploy merges it and runs the deploy stages'
   mkdirSync(bin); mkdirSync(home); writeFileSync(join(tmp, 'checkgate'), '');
   sh(tmp, `git init -q --bare -b main remote.git && git clone -q remote.git repo`);
   writeFileSync(join(repo, 'pipeline.json'), JSON.stringify({
-    environment: 'test',
+    environment: 'test', autoDeploy: false, // most of this test drives the Deploy button; the end turns auto back on
     // Checks wait for checkgate, so the test can start a build while the one before is still checking.
     build: [{ name: 'Checks', run: `echo "== Lint"; until [ -f "${join(tmp, 'checkgate')}" ]; do sleep 0.1; done; echo ok; echo "== Tests"; test -f a.txt && test -f pr.txt` }],
     // Waits for the test to open the gate, so the next batch is built while this deploy is still running.
@@ -234,6 +234,13 @@ esac
     // App ignores the resume variables and runs Pack again: it shows as run, not skipped.
     assert.deepEqual(state.stages.find((s) => s.id === 'deploy1').steps.map((t) => t.status), ['passed', 'passed']);
     assert.equal(state.retry, null);
+
+    // Without "autoDeploy": false (the default): build #10 deploys on its own once green, no Deploy press.
+    sh(repo, `git pull -q --no-rebase origin main && node -e 'const f="pipeline.json",c=JSON.parse(require("fs").readFileSync(f));delete c.autoDeploy;require("fs").writeFileSync(f,JSON.stringify(c))' && git -c user.name=t -c user.email=t@t commit -qam auto && git push -q origin main`);
+    await restart(); // autoDeploy is read from the checkout when the app opens the repo, not from a batch
+    assert.equal((await post('/api/build', { prs: [] })).status, 200);
+    await until((s) => s.live?.number === 10 && !s.deploying, 'build #10 live on its own');
+    assert.equal(state.config.autoDeploy, true);
     events.body.cancel().catch(() => {});
   } finally {
     server.kill();
@@ -252,6 +259,10 @@ test('parallel is ignored on the first stage of a list, so nothing deploys besid
     assert.deepEqual([...readConfig(dir).build, ...readConfig(dir).deploy].map((s) => s.environment), [undefined, 'TestFlight', 'web'], 'environment is for deploy stages, default the pipeline\'s');
     writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({ deploy: [{ name: 'B', run: 'b', environment: ' ' }] }));
     assert.throws(() => readConfig(dir), /empty environment/);
+    writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({ autoDeploy: 'yes' }));
+    assert.throws(() => readConfig(dir), /autoDeploy is true or false/);
+    writeFileSync(join(dir, 'pipeline.json'), JSON.stringify({}));
+    assert.equal(readConfig(dir).autoDeploy, true, 'on unless set to false');
   } finally {
     process.env.HOME = home;
     rmSync(dir, { recursive: true });
