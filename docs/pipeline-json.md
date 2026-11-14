@@ -97,6 +97,8 @@ works from a terminal too.
   - `CI=1` and `FORCE_COLOR=0`, so tools print plain logs.
   - `AWS_PROFILE`, if you typed one on the page.
   - The stage's own `env`.
+  - On a retry, `CICD_RESUME_FROM` and `CICD_PASSED_STEPS`: see "Resuming a retried stage" in the
+    [README](../README.md#resuming-a-retried-stage).
 
 ## Which pipeline.json is used
 

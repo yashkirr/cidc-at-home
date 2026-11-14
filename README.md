@@ -59,16 +59,18 @@ step under the stage, so `echo "== Lint"` gives you a "Lint" step with its own t
 Retry runs a failed deploy stage's whole command again. If its first steps can't run twice (say `terraform apply
 plan.tfplan` deletes the plan), read these, set only on a retry whose earlier steps passed:
 
-- `CICD_RESUME_FROM`: the name of the first step that did not pass, as printed after `== `.
+- `CICD_RESUME_FROM`: the name of the first step that did not pass, as printed after `== ` (empty if it failed
+  after its last step).
 - `CICD_PASSED_STEPS`: the steps that passed before it, one per line.
 
 Skip the passed steps, so the stage starts at `CICD_RESUME_FROM`. The page shows them as "skipped (passed earlier)". The retry runs in
 the same folder, so files they made are still there; shell variables are not, so write what a later step needs to a
-file. A stage that ignores the variables runs every step again, as before.
+file. Exit as soon as a step fails, or the next retry counts it as passed. A stage that ignores the variables runs
+every step again, as before.
 
 ```sh
 passed() { grep -qxF "$1" <<< "$CICD_PASSED_STEPS"; }
-passed Apply || { echo "== Apply"; terraform apply plan.tfplan && rm plan.tfplan; }
+passed Apply || { echo "== Apply"; terraform apply plan.tfplan && rm plan.tfplan || exit 1; }
 echo "== Smoke test"; ./smoke.sh
 ```
 

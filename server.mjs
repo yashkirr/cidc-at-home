@@ -229,8 +229,9 @@ function capture(cmd, args, cwd) {
 function runStage(run, stage, extraArgs, env) {
   return new Promise((res) => {
     const prev = ['failed', 'stopped'].includes(stage.status) ? stage.steps : [];
-    const i = prev.findIndex((t) => !['passed', 'skipped'].includes(t.status)), done = i > 0 ? prev.slice(0, i) : [];
-    const resume = done.length ? { CICD_RESUME_FROM: prev[i].name, CICD_PASSED_STEPS: done.map((t) => t.name).join('\n') } : {};
+    const i = prev.findIndex((t) => !['passed', 'skipped'].includes(t.status)), done = prev.slice(0, i < 0 ? prev.length : i);
+    // Unset, not inherited from your shell, on a run that is not resuming. FROM is empty if it failed between steps.
+    const resume = done.length ? { CICD_RESUME_FROM: prev[i]?.name ?? '', CICD_PASSED_STEPS: done.map((t) => t.name).join('\n') } : { CICD_RESUME_FROM: undefined, CICD_PASSED_STEPS: undefined };
     Object.assign(stage, { ...fresh, status: 'running', steps: done.map((t) => ({ name: t.name, status: 'skipped' })), log: [], started: Date.now() });
     send({ type: 'reset', stage: stage.id });
     send({ type: 'state', state: view() });
@@ -271,13 +272,15 @@ function addLine(stage, raw) {
   const step = line.match(/^== (.+)/);
   if (step) {
     for (const s of stage.steps) if (s.status === 'running') s.status = 'passed';
-    const skipped = stage.steps.find((s) => s.status === 'skipped' && s.name === step[1]);
-    if (skipped) skipped.status = 'running'; // the stage ran a step it could have skipped
+    // A stage that ignores the resume variables runs its skipped steps again, in order, before any new one.
+    const k = stage.steps.findIndex((s) => s.status === 'skipped');
+    if (k >= 0 && stage.steps[k].name === step[1] && stage.steps.slice(k).every((s) => s.status === 'skipped')) stage.steps[k].status = 'running';
     else stage.steps.push({ name: step[1], status: 'running' });
     send({ type: 'state', state: view() });
   }
-  if (line.startsWith('!! ') && stage.steps.at(-1)?.status === 'running') {
-    stage.steps.at(-1).status = 'failed';
+  const now = stage.steps.find((s) => s.status === 'running');
+  if (line.startsWith('!! ') && now) {
+    now.status = 'failed';
     send({ type: 'state', state: view() });
   }
   stage.log.push(line);

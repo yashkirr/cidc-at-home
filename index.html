@@ -90,6 +90,8 @@
   .steps > span { display: flex; gap: 6px; align-items: center; }
   .icon { width: 18px; height: 18px; flex: none; }
   .steps .icon { width: 13px; height: 13px; }
+  .steps .note { display: block; font-size: 12px; }
+  .steps > span:has(.note) { align-items: flex-start; } .steps > span:has(.note) .icon { margin-top: 3px; }
   .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); } .skipped { color: var(--wait); }
   .running.icon { animation: pulse 1.2s var(--ease) infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
@@ -207,7 +209,7 @@ function stepList(s) {
   const seen = new Set(s.steps.map((t) => t.name.replace(/#\d+/g, '#N')));
   const todo = s.status === 'passed' ? [] : (state.planned[s.name] ?? []).filter((n) => !seen.has(n)).map((name) => ({ name, status: 'waiting' }));
   const all = [...s.steps, ...todo];
-  return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}${t.status === 'skipped' ? ` <span class="todo">${label.skipped}</span>` : `<span class="sr"> ${label[t.status]}</span>`}</span></span>`).join('')
+  return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}${t.status === 'skipped' ? `<span class="note">${label.skipped}</span>` : `<span class="sr"> ${label[t.status]}</span>`}</span></span>`).join('')
     : '<span class="todo">Its steps show here after its first run.</span>';
 }
 
