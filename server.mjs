@@ -224,15 +224,20 @@ function capture(cmd, args, cwd) {
 
 // Runs one stage in the lane's worktree. Lines starting "== " are the stage's steps; the last step fails if the stage does.
 // A line starting "!! " fails the current step; the stage can go on to show what else is wrong before it exits.
+// A retried stage is told which steps passed last time (CICD_RESUME_FROM, CICD_PASSED_STEPS; see README), and shows
+// them as skipped. A stage that ignores that prints them again, and they run as before.
 function runStage(run, stage, extraArgs, env) {
   return new Promise((res) => {
-    Object.assign(stage, { ...fresh, status: 'running', steps: [], log: [], started: Date.now() });
+    const prev = ['failed', 'stopped'].includes(stage.status) ? stage.steps : [];
+    const i = prev.findIndex((t) => !['passed', 'skipped'].includes(t.status)), done = i > 0 ? prev.slice(0, i) : [];
+    const resume = done.length ? { CICD_RESUME_FROM: prev[i].name, CICD_PASSED_STEPS: done.map((t) => t.name).join('\n') } : {};
+    Object.assign(stage, { ...fresh, status: 'running', steps: done.map((t) => ({ name: t.name, status: 'skipped' })), log: [], started: Date.now() });
     send({ type: 'reset', stage: stage.id });
     send({ type: 'state', state: view() });
     const args = extraArgs.map((a) => ` ${a}`).join('');
     const child = spawn('bash', ['-c', stage.run + args], {
       cwd: run.work, detached: true,
-      env: { ...process.env, ...env, ...stage.env, PIPELINE_WORK: run.work, PIPELINE_BRANCH: state.config.branch, FORCE_COLOR: '0', CI: '1' },
+      env: { ...process.env, ...env, ...stage.env, ...resume, PIPELINE_WORK: run.work, PIPELINE_BRANCH: state.config.branch, FORCE_COLOR: '0', CI: '1' },
     });
     run.kids.add(child);
     stage.pid = child.pid;
@@ -266,7 +271,9 @@ function addLine(stage, raw) {
   const step = line.match(/^== (.+)/);
   if (step) {
     for (const s of stage.steps) if (s.status === 'running') s.status = 'passed';
-    stage.steps.push({ name: step[1], status: 'running' });
+    const skipped = stage.steps.find((s) => s.status === 'skipped' && s.name === step[1]);
+    if (skipped) skipped.status = 'running'; // the stage ran a step it could have skipped
+    else stage.steps.push({ name: step[1], status: 'running' });
     send({ type: 'state', state: view() });
   }
   if (line.startsWith('!! ') && stage.steps.at(-1)?.status === 'running') {

@@ -81,7 +81,8 @@ pull requests and build them while the deploy runs.
   stacked on it is marked bad and dropped, because it was built on code main does not have.
 - **Retry:** if a deploy stage after the merge fails (say a sign-in ran out), fix the cause, click the failed stage,
   and press **Retry** above its log. It runs that stage and the ones after it again for the same build, in the same
-  folder. A parallel stage that passed beside it is not run again. Nothing is merged again, and a paused queue stays
+  folder. A parallel stage that passed beside it is not run again. The stage is told which of its steps passed, so it
+  can start at the failed one (see "Resuming a retried stage" in the README). Nothing is merged again, and a paused queue stays
   paused until you resume it. A failed merge can't be retried: build again.
 - **Merge on GitHub** checks that the branch on GitHub has the same *files* the batch was built on. Once the batch
   under it is merged, it does, so the stacked batch deploys without a rebuild. If the batch under it did not merge, the

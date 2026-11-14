@@ -90,7 +90,7 @@
   .steps > span { display: flex; gap: 6px; align-items: center; }
   .icon { width: 18px; height: 18px; flex: none; }
   .steps .icon { width: 13px; height: 13px; }
-  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); }
+  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); } .skipped { color: var(--wait); }
   .running.icon { animation: pulse 1.2s var(--ease) infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -175,7 +175,7 @@ async function post(path, body = {}) {
 function showError(text) { const e = $('error'); e.textContent = text || ''; e.hidden = !text; }
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped' };
+const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped', skipped: 'skipped (passed earlier)' };
 // One drawn set: filled disc + white mark for an outcome, outline ring while waiting, half disc while running.
 const mark = {
   waiting: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/>',
@@ -183,6 +183,7 @@ const mark = {
   passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="var(--mark)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="var(--mark)" stroke-width="2" stroke-linecap="round"/>',
   stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="var(--mark)"/>',
+  skipped: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m5.8 9.2 2.1 2.1 4.3-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
 };
 const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
 function took(s) {
@@ -206,7 +207,7 @@ function stepList(s) {
   const seen = new Set(s.steps.map((t) => t.name.replace(/#\d+/g, '#N')));
   const todo = s.status === 'passed' ? [] : (state.planned[s.name] ?? []).filter((n) => !seen.has(n)).map((name) => ({ name, status: 'waiting' }));
   const all = [...s.steps, ...todo];
-  return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}<span class="sr"> ${label[t.status]}</span></span></span>`).join('')
+  return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}${t.status === 'skipped' ? ` <span class="todo">${label.skipped}</span>` : `<span class="sr"> ${label[t.status]}</span>`}</span></span>`).join('')
     : '<span class="todo">Its steps show here after its first run.</span>';
 }
 
