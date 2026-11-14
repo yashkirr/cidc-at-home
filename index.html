@@ -40,6 +40,7 @@
   .btn:active:not(:disabled) { transform: scale(0.97); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .btn.primary:disabled { background: var(--panel); border-color: var(--line); color: var(--muted); opacity: 1; }
   .btn.small { min-height: 36px; padding: 0 12px; font-size: 14px; }
   ::selection { background: color-mix(in srgb, var(--run) 30%, transparent); }
   ::placeholder { color: var(--muted); }
@@ -57,13 +58,16 @@
   .tag { white-space: nowrap; font-size: 12px; border: 1px solid var(--line); border-radius: 99px; padding: 0 7px; color: var(--muted); margin-left: 4px; }
   .empty { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
   /* The pipeline is one flow, left to right: queue, build stages, the deploy gate, deploy stages, what is live. */
-  .flow { display: flex; align-items: stretch; overflow-x: auto; padding: 2px 2px 10px; scrollbar-color: var(--wait) transparent; }
+  .flow { position: relative; display: flex; align-items: flex-start; overflow-x: auto; padding: 2px 2px 10px; scrollbar-color: var(--wait) transparent; }
+  /* More of the flow off to the right: fade the edge so it reads as "scroll for more". */
+  .flow.more { mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
   .node { flex: 1 1 0; min-width: 150px; max-width: 240px; text-align: left; display: flex; flex-direction: column; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
   .stage { cursor: pointer; transition: transform 150ms var(--ease), border-color 150ms var(--ease); }
   .stage:active { transform: scale(0.98); }
   .stage[aria-pressed=true] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
   .node .top { display: flex; gap: 8px; align-items: center; font-weight: 600; }
   .node .who { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 8px 0 0; min-height: 22px; }
+  .node .who:empty { display: none; }
   .node .time { display: block; color: var(--muted); font-size: 13px; margin: 4px 0 0; }
   .chip { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 1px 8px; border-radius: 99px; background: color-mix(in srgb, var(--text) 8%, transparent); }
   .chip.running { background: color-mix(in srgb, var(--run) 16%, transparent); }
@@ -82,9 +86,9 @@
   .live .prs-in { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   .par { flex: 1 1 0; min-width: 150px; max-width: 240px; display: flex; flex-direction: column; gap: 8px; }
   .par > .node { max-width: none; flex: 1 0 auto; }
-  .arrow { align-self: center; color: var(--muted); flex: none; padding: 0 6px; }
+  .arrow { align-self: flex-start; margin-top: 15px; color: var(--muted); flex: none; padding: 0 6px; }
   .arrow svg { width: 16px; height: 16px; display: block; }
-  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node, .par { max-width: none; } .par { padding-left: 10px; border-left: 2px solid var(--line); } .arrow { align-self: flex-start; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
+  @media (max-width: 1000px) { .flow { flex-direction: column; overflow: visible; } .node, .par { max-width: none; } .par { padding-left: 10px; border-left: 2px solid var(--line); } .arrow { align-self: flex-start; margin-top: 0; padding: 4px 0 4px 18px; transform: rotate(90deg); } }
   .steps { margin: 0; padding: 0; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
   .steps > .todo { color: var(--muted); }
   .steps > span { display: flex; gap: 6px; align-items: center; }
@@ -98,6 +102,9 @@
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
   .bar { display: flex; gap: 10px; align-items: center; margin: 16px 0 8px; flex-wrap: wrap; }
   .bar h2 { margin: 0; }
+  pre:empty::before { content: attr(data-empty); color: color-mix(in srgb, var(--log-text) 65%, var(--log-bg)); }
+  .hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+  .livenow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 14px; color: var(--muted); }
   pre { margin: 0; background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 12px; height: 46vh; overflow: auto; font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--fail) 12%, transparent); color: var(--text); border: 1px solid var(--fail); }
   .history { list-style: none; margin: 0; padding: 0; display: grid; }
@@ -128,7 +135,8 @@
 </head>
 <body>
 <header>
-  <h1>CI/CD at home <span id="envName"></span></h1>
+  <h1>CI/CD at home</h1>
+  <span class="livenow" id="liveNow"></span>
   <label>Repo <select id="repo" aria-label="Repo"></select></label>
   <form id="addForm" class="add"><input type="text" id="addPath" placeholder="/path/to/repo" aria-label="Add a repo folder"><button class="btn small">Add repo</button></form>
   <span class="grow"></span>
@@ -144,6 +152,7 @@
     <div class="bar first"><h2 id="prsTitle">Open pull requests</h2><span class="grow"></span><button class="btn small" id="refresh">Refresh</button></div>
     <ul class="prs" id="prs"></ul>
     <button class="btn primary wide" id="build">Build</button>
+    <p class="hint">Merges the ticked PRs onto <span class="branch">main</span> in a test folder and runs your checks. Nothing changes on GitHub until you deploy.</p>
   </section>
   <section class="panel" aria-labelledby="logTitle">
     <div class="bar first"><h2 id="logTitle">Log</h2><span class="grow"></span><button class="btn small primary" id="retry" hidden></button><button class="btn small" id="stopBuild" hidden>Stop build</button><button class="btn small" id="stopDeploy" hidden>Stop deploy</button></div>
@@ -199,7 +208,7 @@ function took(s) {
 function stageCard(s, build) {
   return `<button class="node stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
-    <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : '<span class="none">No build</span>'}${s.environment && s.environment !== state.config.environment ? `<span class="none">to ${esc(s.environment)}</span>` : ''}</span>
+    <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : ''}${s.environment && s.environment !== state.config.environment ? `<span class="none">to ${esc(s.environment)}</span>` : ''}</span>
     <span class="time">${took(s)}</span>
     <span class="under steps">${stepList(s)}</span>
   </button>`;
@@ -210,7 +219,7 @@ function stepList(s) {
   const todo = s.status === 'passed' ? [] : (state.planned[s.name] ?? []).filter((n) => !seen.has(n)).map((name) => ({ name, status: 'waiting' }));
   const all = [...s.steps, ...todo];
   return all.length ? all.map((t) => `<span class="${t.status === 'waiting' ? 'todo' : ''}">${icon(t.status)}<span>${esc(t.name)}${t.status === 'skipped' ? `<span class="note">${label.skipped}</span>` : `<span class="sr"> ${label[t.status]}</span>`}</span></span>`).join('')
-    : '<span class="todo">Its steps show here after its first run.</span>';
+    : '';
 }
 
 // Redrawing replaces the PR list and stage cards, so put keyboard focus back where it was.
@@ -225,7 +234,9 @@ function draw() {
   $('repo').innerHTML = repos.map((r) => `<option value="${esc(r)}" ${state && r === state.repo ? 'selected' : ''}>${esc(r.split('/').pop())}</option>`).join('') || '<option>Add a repo</option>';
   $('build').disabled = $('refresh').disabled = !state;
   if (!state) { $('flow').innerHTML = '<p class="empty">Add a repo folder that has a pipeline.json.</p>'; return; }
-  $('envName').textContent = `to ${state.config.environment}`;
+  document.querySelector('.hint .branch').textContent = state.config.branch;
+  // What is live right now, up top, so it never needs a scroll along the flow to find.
+  $('liveNow').innerHTML = 'Live: ' + state.lives.map(({ environment, live: l }) => `<span class="chip ${l ? 'passed' : ''}">${esc(environment)}: ${l ? 'build #' + l.number : 'none yet'}</span>`).join('');
   const busy = state.building, inDeploy = (n) => state.deployingPrs.includes(n);
   const inBuild = (n) => [state.deployingBuild, ...state.queue, state.build].find((b) => b?.prs.some((p) => p.number === n));
   showError(state.error);
@@ -252,7 +263,12 @@ function draw() {
     : state.buildOk && queue ? `Build #${num} passed. Queue it to deploy after the builds in front.`
     : busy ? `Queue build #${num} now to deploy as soon as it passes.`
     : state.buildOk ? `Build #${num} passed. This ` + merged
-    : state.deploying ? 'Deploying. You can build the next batch now.' : 'Unlocks when every build stage passes.';
+    : state.deploying ? 'Deploying. You can build the next batch now.'
+    : state.build.status === 'live' ? `Build #${num} is live. Tick PRs and build again to ship more.`
+    : state.build.status === 'failed' ? `Deploying build #${num} failed. Check the log, then retry or build again.`
+    : 'Unlocks when every build stage passes.';
+  // "Queue" only when something is in front of it: a build still running, or a deploy or queue ahead.
+  const later = busy || (state.buildOk && (state.deploying || state.queue.length));
   const env = esc(state.config.environment);
   const qItem = (b, i) => {
     const st = b.building ? 'Building' : 'Green';
@@ -260,14 +276,14 @@ function draw() {
     return `<li><span class="chip ${st === 'Green' ? 'passed' : 'running'}">#${b.number}</span><span>${st}</span>${last ? `<button class="btn" data-remove="${b.number}" aria-label="Take build #${b.number} off the queue">Remove</button>` : ''}</li>`;
   };
   const queueNode = `<div class="node queue" role="group" aria-label="Deploy queue">
-      <span class="top">Queue</span>
+      <span class="top">Deploy queue</span>
       <span class="who">${state.queue.length ? `<span class="chip">${state.queue.length} waiting</span>` : '<span class="none">Empty</span>'}</span>
-      <span class="time">${state.paused ? 'Paused. Nothing deploys until you resume' : 'Deploys in this order'}</span>
+      <span class="time">${state.paused ? 'Paused. Nothing deploys until you resume' : state.queue.length ? 'Deploys in this order' : 'Green builds wait here to deploy'}</span>
       <div class="under">${state.paused ? '<button class="btn small" id="resume">Resume queue</button>' : ''}${state.queue.length ? `<ol>${state.queue.map(qItem).join('')}</ol>` : ''}</div>
     </div>`;
   const gateNode = `<div class="node gate" role="group" aria-label="Deploy">
       <span class="top">Deploy to ${env}</span>
-      ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : state.config.autoDeploy && !state.buildOk ? '' : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${queue ? 'Queue deploy' : 'Deploy'}</button>`}
+      ${state.queued ? `<span class="who"><span class="chip">Build #${num} queued</span></span>` : state.config.autoDeploy && !state.buildOk ? '' : `<button class="btn primary" id="deploy" ${state.buildOk || busy ? '' : 'disabled'}>${later ? 'Queue deploy' : 'Deploy'}</button>`}
       <p>${gate}</p>
     </div>`;
   // One card per environment the deploy makes live (pipeline.json "environment"), stacked like parallel stages.
@@ -282,6 +298,7 @@ function draw() {
   const cards = (list, n) => list.reduce((cols, s) => (s.parallel && cols.length ? cols.at(-1).push(s) : cols.push([s]), cols), [])
     .map((col) => (col.length > 1 ? `<div class="par" role="group" aria-label="Run at the same time">${col.map((s) => stageCard(s, n)).join('')}</div>` : stageCard(col[0], n)));
   $('flow').innerHTML = [queueNode, ...cards(build, num), gateNode, ...cards(deploy, state.deployRow), liveNode].join(arrow);
+  fade();
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
 
@@ -295,6 +312,7 @@ function draw() {
   $('logTitle').textContent = viewing ? `Log: Build #${viewing.number} · ${sel.name}` : `Log: ${sel.name}`;
   const log = $('log'), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   log.textContent = sel.log.join('\n').replace(/^\n+/, '');
+  log.dataset.empty = sel.status !== 'waiting' ? 'No output yet.' : state.builds.length ? `${sel.name} has not run${num && sel.group === 'build' ? ` for build #${num}` : ''} yet.` : 'Nothing has run yet. Tick pull requests and press Build.';
   if (atEnd) log.scrollTop = log.scrollHeight;
 
   const live = state.stages.map((s) => `${s.name} ${label[s.status]}`).join(', ');
@@ -375,6 +393,7 @@ new EventSource('/events').onmessage = (e) => {
     if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
     wasRunning = state?.running ?? [];
     render();
+    if (started.length) follow();
   } else if (m.type === 'agent') {
     agentLog = [...agentLog, m.entry].slice(-100);
     drawAgent();
@@ -399,6 +418,14 @@ setInterval(() => {
   }
 }, 1000);
 
+// Keep the stage that just started in view when the flow is wider than the screen.
+function follow() {
+  const f = $('flow'), c = f.querySelector(`.stage[data-id="${CSS.escape(selected)}"]`);
+  if (c && f.scrollWidth > f.clientWidth) f.scrollTo({ left: c.offsetLeft - (f.clientWidth - c.offsetWidth) / 2, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}
+const fade = () => { const f = $('flow'); f.classList.toggle('more', f.scrollLeft + f.clientWidth < f.scrollWidth - 8); };
+$('flow').addEventListener('scroll', fade, { passive: true });
+addEventListener('resize', fade);
 $('prs').addEventListener('change', (e) => { const n = Number(e.target.value); e.target.checked ? picked.add(n) : picked.delete(n); render(); });
 $('flow').addEventListener('click', (e) => {
   if (e.target.closest('#deploy')) {
