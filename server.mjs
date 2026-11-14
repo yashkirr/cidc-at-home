@@ -6,7 +6,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,8 +28,17 @@ const saveRepos = () => writeFileSync(reposFile, JSON.stringify(repos, null, 1))
 
 // Audit trail: every call an agent makes, allowed or not, one JSON line each. Only appended to, never rewritten.
 const agentFile = join(HOME, 'agent-log.jsonl');
-// shortcut: reads the whole file at start for the last 100 entries; fine for years of use, tail it if it ever gets slow
-const agentLog = existsSync(agentFile) ? readFileSync(agentFile, 'utf8').split('\n').filter(Boolean).slice(-100).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
+// The page shows the last 100, so read only the file's tail: it grows with every status check an agent makes.
+function lastEntries() {
+  if (!existsSync(agentFile)) return [];
+  const fd = openSync(agentFile, 'r');
+  try {
+    const size = fstatSync(fd).size, buf = Buffer.alloc(Math.min(size, 256 * 1024));
+    readSync(fd, buf, 0, buf.length, size - buf.length);
+    return buf.toString('utf8').split('\n').slice(size > buf.length ? 1 : 0).filter(Boolean).slice(-100).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  } finally { closeSync(fd); }
+}
+const agentLog = lastEntries();
 function audit(entry) {
   agentLog.push(entry);
   if (agentLog.length > 100) agentLog.shift();
@@ -178,7 +187,7 @@ function view(withLogs = false) {
   const builds = history(), saved = JSON.stringify(builds);
   if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
-    builds, planned: state.record.steps ?? {}, agentLog,
+    builds, planned: state.record.steps ?? {},
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
     config: { branch: state.config.branch, environment: state.config.environment },
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
@@ -475,7 +484,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
-      res.write(`data: ${JSON.stringify({ type: 'state', state: view(true), repos, boot: BOOT })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'state', state: view(true), repos, boot: BOOT, agentLog })}\n\n`); // then each new one as an 'agent' message
       clients.add(res);
       req.on('close', () => clients.delete(res));
       return;
@@ -484,8 +493,10 @@ const server = http.createServer(async (req, res) => {
     const agent = req.method === 'POST' && req.headers['x-token'] === AGENT_TOKEN ? String(req.headers['x-agent'] ?? '').replace(/[^\w .@/:()-]/g, '').slice(0, 80) || 'Unnamed agent' : null;
     if (req.method !== 'POST' || (req.headers['x-token'] !== TOKEN && !agent)) return json(res, 403, { error: 'Not allowed.' });
     let b = null, made = null;
-    if (agent) res.on('close', () => audit({ at: Date.now(), agent, repo: state?.name ?? null, action: url.pathname.replace('/api/', ''), args: b, ok: res.writableFinished && res.statusCode < 400, refused: res.statusCode === 403, error: res.agentError ?? null, build: made }));
+    // Only the fields the actions read are kept, so a huge or odd body can't bloat the log.
+    if (agent) res.on('close', () => audit({ at: Date.now(), agent, repo: state?.name ?? null, action: url.pathname.replace('/api/', ''), args: b && { number: b.number, prs: b.prs, action: b.action }, ok: res.writableFinished && res.statusCode < 400, refused: res.statusCode === 403, error: res.agentError ?? null, build: made }));
     b = await body(req);
+    if (!b || typeof b !== 'object') b = {};
     // What agents can do: read, build, retry, resume. Deploy, rollback, stop, queue changes and repos stay clicks on the page.
     if (agent && !(['/api/status', '/api/prs', '/api/build', '/api/build-log', '/api/retry'].includes(url.pathname) || (url.pathname === '/api/queue' && b.action === 'resume'))) {
       return json(res, 403, { error: (res.agentError = "Agents can't do that. Deploy, rollback, stop and queue changes stay a click on the page.") });
@@ -497,6 +508,8 @@ const server = http.createServer(async (req, res) => {
       case '/api/build': {
         if (!state) throw new Error('Add a repo first.');
         if (batching()) throw new Error('Wait for Batch PRs to finish. The next build stacks on its result.');
+        // A new build queues the one still checking (it stacks on it), and the queue deploys on its own: that's a deploy click.
+        if (agent && building() && !state.queue.includes(state.build)) throw new Error(`Build #${state.build.number} is still running its checks. Wait for it to finish, then build again.`);
         const picked = (b.prs ?? []).map(Number);
         if (!picked.every((n) => state.prs.some((p) => p.number === n && !p.draft))) throw new Error('Pick ready PRs from the list. Drafts can not be merged.');
         const busy = [...inFlight(), ...(building() ? [state.build] : [])];

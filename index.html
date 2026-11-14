@@ -161,7 +161,7 @@
 const TOKEN = '__TOKEN__';
 const $ = (id) => document.getElementById(id);
 let viewing = null, openBuild = null, buildStages = []; // an older build's log shown in the Log panel
-let state = null, repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [], boot = 0;
+let state = null, agentLog = [], repos = [], picked = new Set(), selected = 'batch', lastLive = '', logs = {}, wasRunning = [], boot = 0;
 const profile = $('profile');
 try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
 profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
@@ -326,13 +326,13 @@ function said(a) {
   }
 }
 function drawAgent() {
-  const list = (state?.agentLog ?? []).filter((a) => $('reads').checked || !reads.includes(a.action)).slice(-50).reverse();
+  const list = agentLog.filter((a) => $('reads').checked || !reads.includes(a.action)).slice(-50).reverse();
   $('agent').innerHTML = list.length ? list.map((a) => `<li class="${reads.includes(a.action) ? 'read' : ''}">
       <time>${new Date(a.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
       <span class="by">${esc(a.agent)}</span>
       <span>${esc(said(a))}${a.error ? `<span class="why">${esc(a.error)}</span>` : ''}</span>
       <span class="chip ${a.ok ? 'passed' : 'failed'}">${a.ok ? 'Done' : a.refused ? 'Refused' : 'Failed'}</span>
-    </li>`).join('') : `<li class="empty">${state?.agentLog?.length ? 'Only reads so far. Tick Show reads to see them.' : 'No agent has used the pipeline yet.'}</li>`;
+    </li>`).join('') : `<li class="empty">${agentLog.length ? 'Only reads so far. Tick Show reads to see them.' : 'No agent has used the pipeline yet.'}</li>`;
 }
 $('reads').addEventListener('change', drawAgent);
 
@@ -361,6 +361,7 @@ new EventSource('/events').onmessage = (e) => {
     // The server was restarted (maybe updated): this page's token and code are stale, so start over.
     if (m.boot) { if (boot && boot !== m.boot) return location.reload(); boot = m.boot; }
     if (m.repos) repos = m.repos;
+    if (m.agentLog) { agentLog = m.agentLog; drawAgent(); }
     if (!state && m.state) { picked = new Set(m.state.picked); selected = m.state.retry ?? selected; } // a new tab shows the batch already built, or the failed stage's log
     state = m.state; if (state) repos = state.repos;
     for (const s of state?.stages ?? []) { if (s.log) logs[s.id] = s.log; s.log = logs[s.id] ??= []; }
@@ -370,8 +371,8 @@ new EventSource('/events').onmessage = (e) => {
     if (started.length) selected = started[0]; // follow a stage as it starts, but let the other lane's log stay open
     wasRunning = state?.running ?? [];
     render();
-  } else if (m.type === 'agent' && state) {
-    state.agentLog = [...state.agentLog, m.entry].slice(-100);
+  } else if (m.type === 'agent') {
+    agentLog = [...agentLog, m.entry].slice(-100);
     drawAgent();
   } else if (m.type === 'reset') {
     logs[m.stage] = [];

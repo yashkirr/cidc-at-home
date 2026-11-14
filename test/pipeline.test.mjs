@@ -95,7 +95,7 @@ esac
     const agentKey = JSON.parse(sh(home, 'cat .cicd-at-home/mcp.json')).token;
     assert.notEqual(agentKey, token, 'agents have their own key');
     assert.equal((await fetch(base + '/api/deploy', { method: 'POST', headers: { 'x-token': agentKey, 'x-agent': 'rogue' } })).status, 403, 'agents can not deploy');
-    await until((s) => s.agentLog.at(-1)?.agent === 'rogue', 'refusal logged');
+    for (let i = 0; i < 50 && !sh(home, 'cat .cicd-at-home/agent-log.jsonl').includes('rogue'); i++) await new Promise((r) => setTimeout(r, 100));
     const audit = sh(home, 'cat .cicd-at-home/agent-log.jsonl').trim().split('\n').map((l) => JSON.parse(l));
     assert.deepEqual(audit.map((a) => [a.agent, a.action, a.ok]), [['claude-code 2.1', 'status', true], ['claude-code 2.1', 'build-log', true], ['claude-code 2.1', 'build-log', true],
       ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['rogue', 'deploy', false]]);
