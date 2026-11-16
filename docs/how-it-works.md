@@ -76,6 +76,11 @@ pull requests and build them while the deploy runs.
   build deployed (main as it was then) and runs the deploy stages, as a new build marked "rollback to #N". Main on
   GitHub is not changed, so it is now ahead of what is live. The queue pauses so the next deploy does not ship the bad
   change again: revert it on GitHub (a normal PR), then **Resume queue**.
+- **Staging, bake time and health gates:** with `environments` in pipeline.json, a deploy goes through each
+  environment in turn. After an environment's stages, it bakes while CloudWatch alarms, health URLs or your own checks
+  are watched; a failure rolls that environment back and pauses the queue. An environment can wait for a **Promote**
+  click, only take builds in set hours, or be blocked from its Live card. See
+  [Promotion](pipeline-json.md#promotion-staging-bake-time-and-health-gates).
 - **Take off queue** works on the last build in the queue only, because the ones behind a build are stacked on it.
 - If a deploy fails or is stopped, the queue pauses: look, then **Resume queue**. If its merge failed, every build
   stacked on it is marked bad and dropped, because it was built on code main does not have.

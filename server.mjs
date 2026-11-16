@@ -71,7 +71,64 @@ export function readConfig(dir) {
   if (!/^\w[\w./-]*$/.test(branch)) throw new Error('pipeline.json: branch is not a valid branch name.');
   const environment = typeof c.environment === 'string' && c.environment.trim() ? c.environment : 'prod';
   if (c.autoDeploy != null && typeof c.autoDeploy !== 'boolean') throw new Error('pipeline.json: autoDeploy is true or false.');
-  return { branch, environment, autoDeploy: c.autoDeploy !== false, build: stages(c.build), deploy: stages(c.deploy, environment) };
+  const deploy = stages(c.deploy, environment);
+  return { branch, environment, autoDeploy: c.autoDeploy !== false, build: stages(c.build), deploy, environments: promotions(c.environments, deploy) };
+}
+
+// "environments": { "staging": { "bake": "15m", "gates": [...], "autoPromote": false, "rollback": true, "windows": [...], "timezone": "..." } }.
+// Listing an environment makes it a promotion step: once its stages pass it bakes while its gates are checked, and nothing
+// after it runs until that passes. See docs/pipeline-json.md, "Promotion".
+const ms = (v, what) => {
+  const m = String(v ?? 0).trim().match(/^(\d+)\s*(s|m|h)?$/);
+  if (!m) throw new Error(`pipeline.json: ${what} is a time like "30s", "15m" or "2h".`);
+  return Number(m[1]) * { s: 1e3, m: 6e4, h: 36e5 }[m[2] ?? 'm'];
+};
+const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+function promotions(list, deploy) {
+  if (list == null) return {};
+  if (typeof list !== 'object' || Array.isArray(list)) throw new Error('pipeline.json: environments is an object, one entry per environment.');
+  return Object.fromEntries(Object.entries(list).map(([name, e]) => {
+    const bad = (why) => new Error(`pipeline.json: environments.${name}: ${why}`);
+    if (!e || typeof e !== 'object') throw bad('must be an object.');
+    if (!deploy.some((s) => s.environment === name)) throw bad('no deploy stage makes it live. Give a deploy stage "environment": "' + name + '".');
+    for (const k of ['autoPromote', 'rollback']) if (e[k] != null && typeof e[k] !== 'boolean') throw bad(`${k} is true or false.`);
+    const gates = (Array.isArray(e.gates) ? e.gates : e.gates == null ? [] : [null]).map((g) => {
+      if (Array.isArray(g?.alarms)) {
+        // Passed to the AWS CLI as separate arguments (no shell), but still only names AWS allows.
+        if (!g.alarms.length || !g.alarms.every((a) => typeof a === 'string' && /^[^\x00-\x1f]{1,255}$/.test(a))) throw bad('alarms is a list of CloudWatch alarm names.');
+        if (g.region != null && !/^[a-z]{2}(-[a-z]+)+-\d$/.test(g.region)) throw bad(`"${g.region}" is not an AWS region.`);
+        return { alarms: g.alarms, region: g.region ?? null };
+      }
+      if (typeof g?.url === 'string') {
+        if (!/^https?:\/\//.test(g.url)) throw bad('a url gate needs an http or https address.');
+        return { url: g.url };
+      }
+      if (typeof g?.run === 'string') return { run: g.run };
+      throw bad('each gate is { "alarms": [...] }, { "url": "..." } or { "run": "..." }.');
+    });
+    const windows = (Array.isArray(e.windows) ? e.windows : e.windows == null ? [] : [null]).map((w) => {
+      const t = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v ?? '') ? v : (() => { throw bad('windows need "from" and "to" like "09:00".'); })();
+      // "mon-fri", "sat,sun", "mon-wed,fri" or a list of those.
+      const days = new Set(String(w?.days ?? 'sun-sat').toLowerCase().split(',').flatMap((part) => {
+        const ends = part.split('-').map((d) => DAYS.indexOf(d.trim().slice(0, 3)) + (/^[a-z]{3,9}$/.test(d.trim()) ? 0 : -99));
+        const [a, b = a] = ends;
+        if (ends.length > 2 || a < 0 || b < 0) throw bad('window days are like "mon-fri", "sat,sun" or "wed".');
+        return DAYS.filter((_, i) => (a <= b ? i >= a && i <= b : i >= a || i <= b));
+      }));
+      return { from: t(w?.from), to: t(w?.to), days: DAYS.filter((d) => days.has(d)) };
+    });
+    if (e.timezone != null) try { new Intl.DateTimeFormat('en', { timeZone: e.timezone }); } catch { throw bad(`"${e.timezone}" is not a time zone.`); }
+    return [name, { bake: ms(e.bake, `environments.${name}.bake`), gates, autoPromote: e.autoPromote !== false, rollback: e.rollback !== false, windows, timezone: e.timezone ?? null }];
+  }));
+}
+
+// Is now inside one of the environment's deploy windows? A window can run past midnight ("22:00" to "06:00").
+export function inWindow(c, now = new Date()) {
+  if (!c.windows.length) return true;
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: c.timezone ?? undefined, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now).map((x) => [x.type, x.value]));
+  const day = p.weekday.toLowerCase(), before = DAYS[(DAYS.indexOf(day) + 6) % 7], t = `${p.hour}:${p.minute}`;
+  return c.windows.some((w) => (w.from <= w.to ? w.days.includes(day) && t >= w.from && t < w.to
+    : (w.days.includes(day) && t >= w.from) || (w.days.includes(before) && t < w.to)));
 }
 
 // One pipeline state for the open repo. Stages: batch, build stages, (gate), merge, deploy stages.
@@ -87,8 +144,18 @@ const makeStages = (config) => [
   { id: 'batch', group: 'build', name: 'Batch PRs', run: `bash "${join(HERE, 'batch.sh')}"` },
   ...config.build.map((s, i) => ({ id: `build${i}`, group: 'build', ...s })),
   { id: 'merge', group: 'deploy', name: 'Merge on GitHub', run: `bash "${join(HERE, 'merge.sh')}"` },
-  ...config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })),
+  ...withGates(config.deploy.map((s, i) => ({ id: `deploy${i}`, group: 'deploy', ...s })), config.environments),
 ].map((s) => ({ ...s, ...fresh, steps: [], log: [] }));
+// Each promotion environment gets a gate stage after its last stage (and anything running beside that): bake time and
+// health gates. Nothing after a gate runs until it passes.
+function withGates(list, envs) {
+  for (const [e, c] of Object.entries(envs ?? {})) {
+    let i = list.findLastIndex((s) => s.environment === e);
+    while (list[i + 1]?.parallel) i++;
+    list.splice(i + 1, 0, { id: `gate-${e}`, group: 'deploy', name: c.bake ? `Bake ${e}` : `Check ${e}`, gate: e, environment: e, run: '', env: {}, parallel: false });
+  }
+  return list;
+}
 const newRun = (work, picked = [], buildEnv = {}, under = null, number = null, by = null) => ({
   number, at: Date.now(), by, work, picked, buildEnv, under, buildOk: false, head: null, kids: new Set(), done: false, bad: null,
   prs: picked.map((n) => ({ number: n, title: state.prs.find((p) => p.number === n)?.title ?? '' })), stages: makeStages(state.config),
@@ -125,10 +192,10 @@ function restoreDeploy() {
     // A newer build used its folder since: nothing there to retry, and its pipeline.json is not this build's.
     if (git(String(d.work), 'rev-parse', 'HEAD^{tree}') !== git(String(d.work), 'rev-parse', `${d.head}^{tree}`)) return null;
     const run = newRun(String(d.work), d.picked.map(Number), profileEnv(d.buildEnv?.AWS_PROFILE), null, Number(d.number));
-    const byId = new Map(makeStages(readConfig(run.work)).map((s) => [s.id, s]));
+    const byId = new Map(makeStages(pinned(readConfig(run.work))).map((s) => [s.id, s]));
     run.stages = d.stages.filter((s) => byId.has(s.id)).map((s) => {
       const st = { ...byId.get(s.id), status: s.status, steps: s.steps, log: s.log, started: s.started, ended: s.ended, interrupted: !!s.interrupted };
-      if (st.status === 'running') {
+      if (st.status === 'running' || st.status === 'held') {
         Object.assign(st, { status: 'stopped', interrupted: true }); // its run time is unknown: the app was down
         for (const t of st.steps) if (t.status === 'running') t.status = 'failed';
         st.log.push('The app stopped while this stage ran. Retry runs it again.');
@@ -148,7 +215,8 @@ function restoreDeploy() {
 
 function status(r) {
   if (r === deploying()) return 'deploying';
-  if (r.live) return 'live';
+  // A rollback of one environment (a failed gate) counts as live once it is live there.
+  if (r.live || (r.rollbackOf && Object.values(state.record.live).some((l) => l.number === r.number))) return 'live';
   if (r.done) return 'failed';
   if (r.bad || r.stages.some((s) => s.group === 'build' && ['failed', 'stopped'].includes(s.status))) return 'bad';
   if (state.queue.includes(r)) return 'queued';
@@ -157,10 +225,10 @@ function status(r) {
 // Every build there has been, newest first: this run's builds from memory, older ones as saved. Where a build is
 // (queued, deploying, live, replaced...) comes from the live runs; a build in flight when the app stopped is 'stopped'.
 function history() {
-  const live = state.record.live[state.config.environment]?.number;
+  const live = new Set(Object.values(state.record.live).map((l) => l.number));
   const all = new Map((state.record.builds ?? []).map((b) => [b.number, b]));
   for (const r of state.runs.values()) all.set(r.number, { number: r.number, prs: r.prs, at: r.at, by: r.by ?? null, status: status(r), deployedSha: r.deployedSha ?? null, rollbackOf: r.rollbackOf ?? null });
-  return [...all.values()].map((b) => (b.status === 'live' && b.number !== live ? { ...b, status: 'replaced' } : b))
+  return [...all.values()].map((b) => (b.status === 'live' && !live.has(b.number) ? { ...b, status: 'replaced' } : b))
     .sort((a, b) => b.number - a.number).slice(0, 200); // shortcut: last 200 builds only, page it if you need more
 }
 const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad, building: r.stages.some((s) => s.group === 'build' && s.status === 'running') };
@@ -173,7 +241,7 @@ function openRepo(dir) {
   // Build numbers and what is live, kept between runs of the app.
   const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : { next: 1, live: {} };
   record.builds = (record.builds ?? []).map((b) => (['new', 'building', 'good', 'queued', 'deploying'].includes(b.status) ? { ...b, status: 'stopped' } : b));
-  state = { repo: dir, name: basename(dir), work, config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, deployFile, runs: new Map(), saved: '' };
+  state = { repo: dir, name: basename(dir), work, config, pins: config, prs: [], error: null, deploy: null, queue: [], paused: false, record, recordFile, deployFile, runs: new Map(), saved: '' };
   state.build = newRun(work);
   state.deploy = restoreDeploy();
   send({ type: 'state', state: view() });
@@ -186,16 +254,20 @@ function view(withLogs = false) {
   const b = state.build, dep = deploying(), d = dep ?? (b.buildOk && !state.queue.length ? b : state.deploy ?? b);
   const stages = [...b.stages.filter((s) => s.group === 'build'), ...d.stages.filter((s) => s.group === 'deploy')];
   const builds = history(), saved = JSON.stringify(builds);
+  const wait = dep?.stages.find((s) => s.status === 'held' && state.config.environments[envOf(s)]?.autoPromote === false && !dep.approved?.has(envOf(s)));
   if (saved !== state.saved) { state.record.builds = builds; state.saved = saved; saveRecord(); }
   return {
     builds, planned: state.record.steps ?? {},
     repo: state.repo, name: state.name, repos, prs: state.prs, error: state.error, work: b.work,
-    config: { branch: state.config.branch, environment: state.config.environment, autoDeploy: state.config.autoDeploy },
+    config: { branch: state.config.branch, environment: state.config.environment, autoDeploy: state.config.autoDeploy, environments: state.config.environments },
+    blocks: state.record.blocks ?? {},
+    // A deploy held before an environment you promote into by hand, not promoted yet (a block may hold it too).
+    promote: wait ? { number: dep.number, environment: envOf(wait) } : null,
     picked: b.picked, buildOk: b.buildOk, build: summary(b), stackedOn: b.under?.number ?? null,
     queued: state.queue.includes(b), queue: state.queue.map(summary), paused: state.paused,
     live: state.record.live[state.config.environment] ?? null,
-    // Every environment the deploy stages make live, the pipeline's own first, with the build live in each.
-    lives: [...new Set([state.config.environment, ...state.config.deploy.map((s) => s.environment)])].map((e) => ({ environment: e, live: state.record.live[e] ?? null })),
+    // Every environment the deploy stages make live, with the build live in each. In deploy order, so staging comes before prod.
+    lives: [...new Set([...state.config.deploy.map((s) => s.environment), state.config.environment])].map((e) => ({ environment: e, live: state.record.live[e] ?? null })),
     deployingBuild: summary(dep), deployRow: d.number,
     building: building(), canBuild: !batching(), deploying: !!dep, deployingPrs: [...inFlight(), ...(building() ? [b] : [])].flatMap((r) => r.picked), deployWork: state.deploy?.work ?? null,
     retry: d === state.deploy ? retryable()?.id ?? null : null,
@@ -291,31 +363,157 @@ function addLine(stage, raw) {
 
 // Runs stages in order. A "parallel" stage starts with the one before it; the next stage waits for all of them.
 // A stage that does not pass stops the later stages of its environment, once its whole group has finished. Other
-// environments go on. Build stages and the merge have none, so they stop everything.
-async function runStages(run, stages, env) {
+// environments go on. Build stages, the merge and promotion gates have none, so they stop everything.
+// promote (deploys, not rollbacks): before an environment's first stage runs, wait while it is blocked, outside its
+// deploy windows, or waiting for a Promote click; after each group, mark live what is live.
+async function runStages(run, stages, env, promote = false) {
   const failed = new Set();
+  // Environments that already started (a retry, or the merge before them) don't wait again.
+  const seen = new Set(run.stages.filter((s) => s.status === 'passed').map(envOf));
   for (let i = 0; i < stages.length;) {
     let j = i + 1;
     while (stages[j]?.parallel) j++;
-    const group = stages.slice(i, j).filter((s) => !failed.has(s.environment));
-    const oks = await Promise.all(group.map((s) => runStage(run, s, [], env)));
-    group.forEach((s, k) => oks[k] || failed.add(s.environment));
+    const group = stages.slice(i, j).filter((s) => s.gate || !failed.has(s.environment));
+    const starts = [...new Set(group.map(envOf))].filter((e) => e && !seen.has(e));
+    if (promote && !(await hold(run, group, starts))) return false;
+    starts.forEach((e) => seen.add(e));
+    const oks = await Promise.all(group.map((s) => (s.gate ? runGate(run, s) : runStage(run, s, [], env))));
+    group.forEach((s, k) => oks[k] || failed.add(s.gate ? undefined : s.environment));
+    if (promote) markLive(run);
     if (failed.has(undefined) || group.some((s) => s.status === 'stopped')) return false; // and Stop stops it all
     i = j;
   }
   return !failed.size;
 }
+// The merge belongs to the first environment it deploys to: a block on that one holds the merge too.
+const envOf = (s) => (s.id === 'merge' ? state.config.deploy[0]?.environment ?? state.config.environment : s.group === 'deploy' ? s.environment : undefined);
+
+// Waits on blocks, deploy windows and Promote clicks, re-checking when one changes (wake) and every 15 s for windows.
+const wakers = new Set();
+const wake = () => { for (const w of wakers) w(); wakers.clear(); };
+const nap = (t) => new Promise((r) => { const k = () => { clearTimeout(id); r(); }; const id = setTimeout(() => { wakers.delete(k); r(); }, t); wakers.add(k); });
+function closed(run, e) {
+  const b = state.record.blocks?.[e], c = state.config.environments[e];
+  if (b) return { hold: 'block', note: `${e} is blocked: ${b.reason}` };
+  if (c && !c.autoPromote && !run.approved?.has(e)) return { hold: 'approve', note: `Waiting for you to promote to ${e}` };
+  if (c && !inWindow(c)) return { hold: 'window', note: `Outside ${e}'s deploy hours` };
+  return null;
+}
+async function hold(run, group, envs) {
+  for (let held = false; ; held = true) {
+    if (run.halt) { for (const s of group) Object.assign(s, { status: 'stopped', hold: null, note: null }); return false; }
+    const why = envs.map((e) => closed(run, e)).find(Boolean);
+    if (!why) {
+      if (held) for (const s of group) Object.assign(s, { status: 'waiting', hold: null, note: null });
+      return true;
+    }
+    if (!held || group[0].note !== why.note) {
+      for (const s of group) Object.assign(s, { status: 'held', ...why });
+      saveDeploy();
+      send({ type: 'state', state: view() });
+    }
+    await nap(15000);
+  }
+}
+
+// A gate stage: the environment's stages passed, then it bakes for its bake time while its gates are checked, at the
+// start, every 30 s, and at the end. One failed check fails the gate (and rolls the environment back, see deploy()).
+// shortcut: a single failed check fails it, no retries or thresholds; put those in a "run" gate if you need them.
+async function runGate(run, s) {
+  const e = s.gate, c = state.config.environments[e];
+  Object.assign(s, { ...fresh, status: 'running', steps: [], log: [], started: Date.now(), verdict: null });
+  send({ type: 'reset', stage: s.id });
+  // verdict: 'sick' (a gate says the environment is unhealthy) or 'broke' (a check could not run).
+  const end = (ok, verdict = null) => {
+    for (const t of s.steps) if (t.status === 'running') t.status = ok ? 'passed' : 'failed';
+    Object.assign(s, { status: ok ? 'passed' : run.halt ? 'stopped' : 'failed', ended: Date.now(), verdict });
+    saveDeploy();
+    send({ type: 'state', state: view() });
+    return ok;
+  };
+  if (run.stages.some((x) => x.environment === e && !x.gate && x.status !== 'passed')) {
+    addLine(s, `${e} did not deploy, so nothing after it runs.`);
+    return end(false);
+  }
+  addLine(s, c.bake ? `== Bake ${mins(c.bake)}` : '== Health checks');
+  if (!c.gates.length) addLine(s, 'No gates set, so only the bake time.');
+  saveDeploy();
+  for (const until = Date.now() + c.bake; ;) {
+    for (const g of c.gates) {
+      const fail = await check(run, s, g);
+      if (run.halt) return end(false);
+      // Unhealthy: roll back. Couldn't check (sign-in ran out, no aws, a typo): stop here, but leave it be.
+      if (fail) {
+        addLine(s, `!! ${fail.why}`);
+        if (!fail.sick) addLine(s, 'That is a problem with the check, not a sign the app is unhealthy, so nothing is rolled back. Fix it, then Retry this stage.');
+        return end(false, fail.sick ? 'sick' : 'broke');
+      }
+    }
+    const left = until - Date.now();
+    if (left <= 0) break;
+    await nap(Math.min(30000, left));
+    if (run.halt) return end(false);
+  }
+  addLine(s, `${e} is healthy.`);
+  return end(true);
+}
+const mins = (t) => (t >= 6e4 ? `${Math.round(t / 6e4)} min` : `${Math.round(t / 1e3)} s`);
+
+// One gate check. Returns null, or { why, sick }: sick when the environment looks unhealthy, not when the check broke. AWS goes through the AWS CLI with the build's sign-in: your default
+// credential chain, or the AWS profile the build used. No keys are stored here.
+async function check(run, s, g) {
+  const at = new Date().toLocaleTimeString();
+  if (g.alarms) {
+    const r = await probe(run, 'aws', ['cloudwatch', 'describe-alarms', '--alarm-types', 'MetricAlarm', 'CompositeAlarm', '--alarm-names', ...g.alarms, ...(g.region ? ['--region', g.region] : []), '--output', 'json',
+      '--query', '{m: MetricAlarms[].[AlarmName, StateValue], c: CompositeAlarms[].[AlarmName, StateValue]}']);
+    if (!r.ok) return { why: `Could not read the CloudWatch alarms: ${r.out.trim().split('\n').at(-1) || 'aws failed'}` };
+    let found;
+    try { const j = JSON.parse(r.out); found = new Map([...(j.m ?? []), ...(j.c ?? [])]); } catch { return { why: 'The AWS CLI answer was not JSON.' }; }
+    const missing = g.alarms.filter((a) => !found.has(a)), firing = g.alarms.filter((a) => found.get(a) === 'ALARM');
+    if (missing.length) return { why: `No CloudWatch alarm named ${missing.join(', ')}${g.region ? ` in ${g.region}` : ''}.` };
+    if (firing.length) return { why: `CloudWatch alarm in ALARM: ${firing.join(', ')}.`, sick: true };
+    addLine(s, `${at} alarms OK: ${g.alarms.map((a) => `${a} (${found.get(a)})`).join(', ')}`);
+    return null;
+  }
+  if (g.url) {
+    try {
+      const r = await fetch(g.url, { signal: AbortSignal.timeout(10000), redirect: 'manual' });
+      r.body?.cancel().catch(() => {}); // only the status matters; let the connection go
+      if (r.status < 200 || r.status >= 400) return { why: `${g.url} answered ${r.status}.`, sick: true };
+      addLine(s, `${at} ${g.url} answered ${r.status}`);
+      return null;
+    } catch (err) { return { why: `${g.url} did not answer: ${err.cause?.code ?? err.message}.`, sick: true }; }
+  }
+  const r = await probe(run, 'bash', ['-c', g.run]);
+  for (const l of r.out.trim().split('\n').filter(Boolean).slice(-5)) addLine(s, l.replace(/^(==|!!) /, ''));
+  return r.ok ? (addLine(s, `${at} "${g.run}" passed`), null) : { why: `"${g.run}" failed.`, sick: true };
+}
+// Runs a gate's command in the build's folder with the build's sign-in, as a stage would. Stop stops it. 2 min limit.
+function probe(run, cmd, args) {
+  return new Promise((res) => {
+    const p = spawn(cmd, args, { cwd: run.work, detached: true, env: { ...process.env, ...run.buildEnv, PIPELINE_WORK: run.work, PIPELINE_BRANCH: state.config.branch, FORCE_COLOR: '0', CI: '1', AWS_PAGER: '' } });
+    run.kids.add(p);
+    const t = setTimeout(() => stop([p]), 120000);
+    let out = '';
+    p.stdout.on('data', (d) => (out = (out + d).slice(-20000)));
+    p.stderr.on('data', (d) => (out = (out + d).slice(-20000)));
+    p.on('error', (err) => (out += `\n${cmd}: ${err.code === 'ENOENT' ? 'not installed' : err.message}`));
+    p.on('close', (code) => { clearTimeout(t); run.kids.delete(p); res({ ok: code === 0, out }); });
+  });
+}
 
 // Marks live each environment whose stages all passed in this deploy (the merge too, if it has one). A retry that
 // only reran another environment's stage keeps the time a build first went live.
-function markLive(run, extra = {}) {
+// only: a rollback of some environments marks just those. sha: what a rollback of that environment redeploys.
+function markLive(run, extra = {}, only = null) {
   const deploy = run.stages.filter((s) => s.group === 'deploy');
   if (deploy.some((s) => s.id === 'merge' && s.status !== 'passed')) return [];
-  const envs = [...new Set([state.config.environment, ...deploy.map((s) => s.environment).filter(Boolean)])];
+  const envs = only ?? [...new Set([state.config.environment, ...deploy.map((s) => s.environment).filter(Boolean)])];
   const went = envs.filter((e) => deploy.every((s) => s.environment !== e || s.status === 'passed'));
+  const sha = went.length ? git(run.work, 'rev-parse', 'HEAD') : null;
   for (const e of went) {
     const was = state.record.live[e];
-    state.record.live[e] = { number: run.number, prs: run.prs, at: was?.number === run.number ? was.at : Date.now(), ...extra };
+    state.record.live[e] = { number: run.number, prs: run.prs, at: was?.number === run.number ? was.at : Date.now(), sha, ...extra };
   }
   if (went.length) saveRecord();
   return went;
@@ -345,13 +543,13 @@ async function build(picked, env, by = null) {
     run.head = git(run.work, 'rev-parse', 'HEAD'); // what the next build stacks on
     send({ type: 'state', state: view() });
     // The batch's own pipeline.json runs, as CI runs a PR's own workflow files.
-    refreshStagesFromBatch(run);
+    try { refreshStagesFromBatch(run, true); } catch (e) { run.bad = state.error = e.message; ok = false; }
     // Unless your pipeline.json says "autoDeploy": false, it is queued now, so it deploys on its own once green. Before any
     // newer build can start (that waits for this batch), so the queue keeps build order.
-    if (state.config.autoDeploy && !state.queue.includes(run)) state.queue.push(run);
+    if (ok && state.config.autoDeploy && !state.queue.includes(run)) state.queue.push(run);
     send({ type: 'state', state: view(true) });
     // A queued build that threw would sit at the head of the queue forever: count it as failed instead.
-    ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env).catch((e) => {
+    if (ok) ok = await runStages(run, run.stages.filter((s) => s.group === 'build' && s.id !== 'batch'), env).catch((e) => {
       state.error = e.message;
       for (const s of run.stages) if (s.status === 'running') s.status = 'failed';
       return false;
@@ -365,9 +563,20 @@ async function build(picked, env, by = null) {
   pump();
 }
 
-function refreshStagesFromBatch(run) {
-  // branch and autoDeploy come from your checkout when the repo opens, never from a batch: a PR can't switch on its own deploy.
-  state.config = { ...readConfig(run.work), branch: state.config.branch, autoDeploy: state.config.autoDeploy };
+// strict (builds): with promotion rules in your checkout, a batch must deploy to the same environments, so a PR can't
+// rename prod to dodge its gates. A rollback rebuilds an older commit as it was, so it is not held to that.
+function pinned(c, strict = false) {
+  const p = state.pins, envs = (x) => [...new Set(x.deploy.map((s) => s.environment))].sort().join(', ');
+  if (strict && Object.keys(p.environments).length && envs(c) !== envs(p)) {
+    throw new Error(`This batch's pipeline.json deploys to ${envs(c) || 'nothing'}, but yours deploys to ${envs(p)}. Environments with promotion rules can't change in a pull request: merge it by hand, restart the app, then build.`);
+  }
+  return { ...c, branch: p.branch, autoDeploy: p.autoDeploy, environments: Object.fromEntries(Object.entries(p.environments).filter(([e]) => c.deploy.some((s) => s.environment === e))) };
+}
+function refreshStagesFromBatch(run, strict = false) {
+  // branch, autoDeploy and environments (approvals, gates, windows) come from your checkout when the repo opens, never
+  // from a batch: a PR can't switch on its own deploy or drop the checks on it. Stages for an environment the batch no
+  // longer deploys to get no gate.
+  state.config = pinned(readConfig(run.work), strict);
   const [batch] = run.stages;
   run.stages = [batch, ...makeStages(state.config).slice(1)];
 }
@@ -385,8 +594,11 @@ function freeWork() {
 // Rollback: rebuild the commit an earlier build deployed (main as it was then) and run only the deploy stages.
 // Main on GitHub is not touched, so it is now ahead of what is live: the queue pauses, so the next deploy does not
 // ship the bad change again. Revert it on GitHub, then resume the queue. It is a build of its own, "rollback to #N".
-async function rollback(to, env) {
+// only: just these environments (a failed gate rolls back its own environment), else all of them. sha: that
+// environment's commit when build #to went live there. why: what set it off, kept at the front of the message.
+async function rollback(to, env, only = null, sha = null, why = '') {
   const target = history().find((b) => b.number === to);
+  sha ??= target.deployedSha;
   const run = newRun(freeWork(), [], env, null, state.record.next++);
   Object.assign(run, { prs: target.prs, rollbackOf: to });
   state.runs.set(run.number, run);
@@ -395,18 +607,20 @@ async function rollback(to, env) {
   state.error = null;
   send({ type: 'state', state: view(true) });
   try {
-    let ok = await runStage(run, run.stages[0], [], { ...env, PIPELINE_BASE: target.deployedSha, PIPELINE_ROLLBACK: String(to) });
+    let ok = await runStage(run, run.stages[0], [], { ...env, PIPELINE_BASE: sha, PIPELINE_ROLLBACK: String(to) });
     if (ok) refreshStagesFromBatch(run); // that commit's own stages
-    run.stages = run.stages.filter((s) => s.id !== 'merge');
+    // No merge, and no bake or gates: a rollback goes back to what was healthy, as fast as it can. No waits either:
+    // blocks and deploy windows hold promotions, not a way back.
+    run.stages = run.stages.filter((s) => s.group === 'build' || (s.id !== 'merge' && !s.gate && (!only || only.includes(s.environment))));
     send({ type: 'state', state: view(true) });
     if (ok) await runStages(run, run.stages.slice(1), env);
   } finally {
     run.done = true;
-    const went = run.stages[0].status === 'passed' ? markLive(run, { rollbackOf: to }) : [];
-    if (went.includes(state.config.environment)) {
-      Object.assign(run, { live: true, deployedSha: target.deployedSha });
-      state.error = `Rolled back to build #${to}. Main on GitHub is still ahead of what is live, so the queue is paused. Revert the bad change on GitHub, then resume the queue.`;
-    } else state.error = `The rollback to build #${to} did not finish. Check its log.`;
+    const went = run.stages[0].status === 'passed' ? markLive(run, { rollbackOf: to }, only) : [];
+    if (went.includes(state.config.environment)) Object.assign(run, { live: true, deployedSha: sha });
+    const where = only ? ` ${only.join(', ')}` : '';
+    if (went.length === (only ?? [state.config.environment]).length && went.length) state.error = `${why}Rolled${where} back to build #${to}. Main on GitHub is still ahead of what is live, so the queue is paused. Revert the bad change on GitHub, then resume the queue.`;
+    else state.error = `${why}The rollback${where} to build #${to} did not finish. Check its log.`;
     saveDeploy();
     send({ type: 'state', state: view(true) });
   }
@@ -431,12 +645,12 @@ function pump() {
 // from: a retry starts at the failed stage, in the same folder, with the merge already done.
 async function deploy(run, from = 'merge') {
   state.deploy = run;
-  Object.assign(run, { buildOk: false, done: false }); // one deploy per green build
+  Object.assign(run, { buildOk: false, done: false, halt: false }); // one deploy per green build
   try {
     // A retry skips stages that already passed beside the failed one, so a parallel peer does not run twice.
     const stages = run.stages.filter((s) => s.group === 'deploy');
     const todo = stages.slice(stages.findIndex((s) => s.id === from)).filter((s) => from === 'merge' || s.status !== 'passed');
-    await runStages(run, todo, run.buildEnv);
+    await runStages(run, todo, run.buildEnv, true);
     // Never deploy a build stacked on one that did not merge.
     if (run.stages.find((s) => s.id === 'merge')?.status !== 'passed') drop(run, 'did not merge');
   } finally {
@@ -453,7 +667,24 @@ async function deploy(run, from = 'merge') {
       state.paused = true;
       state.error = `Build #${run.number} did not deploy, so the queue is paused. Check, then resume it.`;
     }
+    // A failed health gate rolls its environment back to the build live there before, like Amazon's pipelines do.
+    // Through the usual rollback, so the queue stays paused until you resume it. A check that could not run, rollback
+    // off, or nothing live there before: the build stays, and its Live card says it failed or was not checked.
+    const g = run.stages.find((s) => s.gate && s.verdict), prev = g && state.record.live[g.gate];
+    const sha = prev && prev.number !== run.number && (prev.sha ?? history().find((b) => b.number === prev.number)?.deployedSha);
+    const back = g?.verdict === 'sick' && state.config.environments[g.gate]?.rollback && sha;
+    if (g) {
+      state.paused = true;
+      const why = (g.log.findLast((l) => l.startsWith('!! '))?.slice(3) ?? 'see its log').replace(/([^.])$/, '$1.');
+      state.error = g.verdict === 'broke' ? `Build #${run.number} could not be checked in ${g.gate}: ${why} Nothing was rolled back. Fix the check, then retry ${g.name}.`
+        : `Build #${run.number} failed its health gates in ${g.gate}: ${why}${back ? '' : state.config.environments[g.gate]?.rollback ? ` Nothing was live in ${g.gate} before, so there is nothing to roll back to.` : ' Rollback is off for it, so it is still there.'}`;
+      if (!back) {
+        state.record.live[g.gate] = { number: run.number, prs: run.prs, at: Date.now(), sha: git(run.work, 'rev-parse', 'HEAD'), health: g.verdict };
+        saveRecord();
+      }
+    }
     saveDeploy();
+    if (back) rollback(prev.number, run.buildEnv, [g.gate], sha, `${state.error} `).catch((e) => { state.error += ` The rollback could not start: ${e.message}`; send({ type: 'state', state: view() }); });
     send({ type: 'state', state: view(true) });
     loadPrs().catch(() => {}); // merged PRs drop off the list
     pump();
@@ -576,9 +807,38 @@ const server = http.createServer(async (req, res) => {
         send({ type: 'state', state: view() });
         break;
       case '/api/stop':
-        // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both.
+        // The whole stage, not just bash. lane picks the build or the deploy; no lane stops both. halt ends a deploy's
+        // wait (a hold or a bake) too.
         stop(b.lane === 'build' ? kids([state.build, ...state.queue].filter((r) => r !== deploying())) : b.lane === 'deploy' ? kids([deploying()]) : children());
+        if (b.lane !== 'build' && deploying()) { deploying().halt = true; wake(); }
         break;
+      case '/api/promote': {
+        // Lets a build into an environment that has "autoPromote": false. Only the deploy waiting there; a block or
+        // deploy window can still hold it after that.
+        const p = view()?.promote;
+        if (!p || p.number !== Number(b.number) || p.environment !== b.environment) throw new Error('Nothing is waiting to be promoted there.');
+        (deploying().approved ??= new Set()).add(p.environment);
+        wake();
+        send({ type: 'state', state: view() });
+        break;
+      }
+      case '/api/block': {
+        // Blocks promotions into an environment, with a reason, until unblocked. Saved, so it outlasts a restart.
+        if (!state) throw new Error('Add a repo first.');
+        const e = String(b.environment ?? '');
+        if (!view().lives.some((l) => l.environment === e)) throw new Error('No such environment.');
+        state.record.blocks ??= {};
+        if (b.action === 'unblock') delete state.record.blocks[e];
+        else {
+          const reason = String(b.reason ?? '').replace(/[\x00-\x1f]/g, ' ').trim().slice(0, 200);
+          if (!reason) throw new Error('Say why, so others know when it can come off.');
+          state.record.blocks[e] = { reason, at: Date.now() };
+        }
+        saveRecord();
+        wake();
+        send({ type: 'state', state: view() });
+        break;
+      }
       default: return json(res, 404, { error: 'No such action.' });
     }
     json(res, 200, { ok: true });

@@ -20,6 +20,10 @@ Treat the page like a deploy key.
   `~/.cicd-at-home/agent-log.jsonl` (readable only by you) and shown under Agent activity. The agent's name is what its
   MCP client reports, so it says which tool acted, not proof of who. The log is plain text: anything running as you
   could edit it.
+- **A pull request can't loosen its own deploy.** `autoDeploy` and `environments` (Promote by hand, gates, bake time,
+  deploy hours) are read from your own checkout when the app opens the repo, never from a batch.
+- **Health gates use your existing sign-in.** CloudWatch gates call the AWS CLI with the build's AWS profile or your
+  default credential chain. The app never stores AWS keys.
 - **No fork pull requests.** Only pull requests from branches in the same repo are listed. Fork pull requests would let
   anyone on GitHub run code on your machine.
 - **No drafts.** Draft pull requests can't be picked.

@@ -83,6 +83,13 @@
   .queue li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 28px; }
   .queue li .btn { margin-left: auto; min-height: 28px; padding: 0 8px; font-size: 12px; }
   .live { border-color: color-mix(in srgb, var(--pass) 45%, var(--line)); }
+  .rules { margin: 10px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--muted); }
+  .blocked { margin: 10px 0 0; display: grid; gap: 8px; }
+  .blocked p { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+  .blocked .btn, .live > .btn { justify-self: start; min-height: 36px; padding: 0 10px; font-size: 13px; }
+  .live > .btn { margin-top: 10px; align-self: flex-start; }
+  .chip.held { background: color-mix(in srgb, var(--stop) 18%, transparent); }
+  .live.isblocked { border-color: color-mix(in srgb, var(--stop) 55%, var(--line)); }
   .live .prs-in { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   .par { flex: 1 1 0; min-width: 150px; max-width: 240px; display: flex; flex-direction: column; gap: 8px; }
   .par > .node { max-width: none; flex: 1 0 auto; }
@@ -96,7 +103,7 @@
   .steps .icon { width: 13px; height: 13px; }
   .steps .note { display: block; font-size: 12px; }
   .steps > span:has(.note) { align-items: flex-start; } .steps > span:has(.note) .icon { margin-top: 3px; }
-  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped { color: var(--stop); } .skipped { color: var(--wait); }
+  .waiting { color: var(--wait); } .running { color: var(--run); } .passed { color: var(--pass); } .failed { color: var(--fail); } .stopped, .held { color: var(--stop); } .skipped { color: var(--wait); }
   .running.icon { animation: pulse 1.2s var(--ease) infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -186,7 +193,7 @@ async function post(path, body = {}) {
 function showError(text) { const e = $('error'); e.textContent = text || ''; e.hidden = !text; }
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped', skipped: 'skipped (passed earlier)' };
+const label = { waiting: 'Waiting', running: 'Running', passed: 'Passed', failed: 'Failed', stopped: 'Stopped', held: 'On hold', skipped: 'skipped (passed earlier)' };
 // One drawn set: filled disc + white mark for an outcome, outline ring while waiting, half disc while running.
 const mark = {
   waiting: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/>',
@@ -194,14 +201,37 @@ const mark = {
   passed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m5.5 9.2 2.3 2.3 4.7-4.9" fill="none" stroke="var(--mark)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   failed: '<circle cx="9" cy="9" r="8" fill="currentColor"/><path d="m6.2 6.2 5.6 5.6m0-5.6-5.6 5.6" stroke="var(--mark)" stroke-width="2" stroke-linecap="round"/>',
   stopped: '<circle cx="9" cy="9" r="8" fill="currentColor"/><rect x="6" y="6" width="6" height="6" rx="1" fill="var(--mark)"/>',
+  held: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7.2 6v6m3.6-6v6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   skipped: '<circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m5.8 9.2 2.1 2.1 4.3-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
 };
 const icon = (st) => `<svg class="icon ${st}" viewBox="0 0 18 18" aria-hidden="true">${mark[st]}</svg>`;
 function took(s) {
   if (s.interrupted) return 'Stopped when the app closed';
+  if (s.status === 'held') return s.note;
   if (!s.started) return label[s.status];
   const sec = Math.round(((s.ended || Date.now()) - s.started) / 1000);
   return `${label[s.status]}, ${sec < 60 ? sec + ' s' : Math.floor(sec / 60) + ' min ' + (sec % 60) + ' s'}`;
+}
+
+// The first environment a deploy goes to: the merge's.
+const firstEnv = () => state.lives[0]?.environment ?? state.config.environment;
+// What guards an environment, from "environments" in pipeline.json, in plain words.
+const DAY = { sun: 'Sun', mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat' };
+function rules(environment) {
+  const c = state.config.environments?.[environment];
+  if (!c) return '';
+  const order = Object.keys(DAY), when = (w) => {
+    const i = w.days.map((d) => order.indexOf(d)), run = i.every((x, k) => !k || x === i[k - 1] + 1);
+    return w.days.length === 7 ? 'every day' : run && i.length > 2 ? `${DAY[w.days[0]]} to ${DAY[w.days.at(-1)]}` : w.days.map((d) => DAY[d]).join(', ');
+  };
+  const n = c.gates.length, wait = c.bake >= 6e4 ? `${Math.round(c.bake / 6e4)} min` : `${Math.round(c.bake / 1e3)} s`;
+  const lines = [
+    c.bake ? `Bakes ${wait}` : '',
+    n ? `${n} health gate${n > 1 ? 's' : ''}${c.rollback ? ', rolls back if one fails' : ''}` : '',
+    c.autoPromote ? '' : 'You promote each build',
+    ...c.windows.map((w) => `Deploys ${when(w)}, ${w.from} to ${w.to}${c.timezone ? ` ${c.timezone}` : ''}`),
+  ].filter(Boolean);
+  return lines.length ? `<ul class="rules">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : '';
 }
 
 // Each stage is a node in the flow: its name and state, the build in it, and its checks underneath.
@@ -209,7 +239,7 @@ function stageCard(s, build) {
   return `<button class="node stage" data-id="${s.id}" aria-pressed="${s.id === selected}">
     <span class="top">${icon(s.status)}${esc(s.name)}</span>
     <span class="who">${build && s.status !== 'waiting' ? `<span class="chip ${s.status}">Build #${build}</span>` : ''}${s.environment && s.environment !== state.config.environment ? `<span class="none">to ${esc(s.environment)}</span>` : ''}</span>
-    <span class="time">${took(s)}</span>
+    <span class="time">${esc(took(s))}</span>
     <span class="under steps">${stepList(s)}</span>
   </button>`;
 }
@@ -269,7 +299,7 @@ function draw() {
     : 'Unlocks when every build stage passes.';
   // "Queue" only when something is in front of it: a build still running, or a deploy or queue ahead.
   const later = busy || (state.buildOk && (state.deploying || state.queue.length));
-  const env = esc(state.config.environment);
+  const env = esc(firstEnv());
   const qItem = (b, i) => {
     const st = b.building ? 'Building' : 'Green';
     const last = i === state.queue.length - 1;
@@ -287,17 +317,35 @@ function draw() {
       <p>${gate}</p>
     </div>`;
   // One card per environment the deploy makes live (pipeline.json "environment"), stacked like parallel stages.
-  const liveCard = ({ environment, live: l }) => `<div class="node live" role="group" aria-label="Live in ${esc(environment)}">
-      <span class="top">${l ? icon('passed') : icon('waiting')}Live in ${esc(environment)}</span>
-      <span class="who">${l ? `<span class="chip passed">Build #${l.number}</span>${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
+  // Each says what guards it (bake, health checks, promote, deploy hours) and can be blocked.
+  const liveCard = ({ environment, live: l }) => {
+    const blk = state.blocks[environment], e = esc(environment);
+    return `<div class="node live ${blk ? 'isblocked' : ''}" role="group" aria-label="Live in ${e}">
+      <span class="top">${l ? icon(l.health ? 'failed' : 'passed') : icon('waiting')}Live in ${e}</span>
+      <span class="who">${l ? `<span class="chip ${l.health ? 'failed' : 'passed'}">Build #${l.number}</span>${l.health ? `<span class="none">${l.health === 'sick' ? 'failed its health gates' : 'health not checked'}</span>` : ''}${l.rollbackOf ? `<span class="none">rollback to #${l.rollbackOf}</span>` : ''}` : '<span class="none">Nothing yet</span>'}</span>
       <span class="time">${l ? new Date(l.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Deploy a build to see it here'}</span>
       <ul class="under prs-in">${l ? (l.prs.length ? l.prs.map((p) => `<li>#${p.number} ${esc(p.title)}</li>`).join('') : `<li>${esc(state.config.branch)} as it was, no PRs</li>`) : ''}</ul>
+      ${rules(environment)}
+      ${blk ? `<div class="blocked"><p><span class="chip held">Blocked</span> ${esc(blk.reason)}</p><button class="btn" data-unblock="${e}">Unblock ${e}</button></div>`
+        : `<button class="btn" data-block="${e}" aria-label="Block deploys to ${e}">Block deploys</button>`}
     </div>`;
+  };
   const liveNode = state.lives.length > 1 ? `<div class="par" role="group" aria-label="Environments">${state.lives.map(liveCard).join('')}</div>` : liveCard(state.lives[0]);
   // Stages that run at the same time ("parallel" in pipeline.json) stack in one column.
   const cards = (list, n) => list.reduce((cols, s) => (s.parallel && cols.length ? cols.at(-1).push(s) : cols.push([s]), cols), [])
     .map((col) => (col.length > 1 ? `<div class="par" role="group" aria-label="Run at the same time">${col.map((s) => stageCard(s, n)).join('')}</div>` : stageCard(col[0], n)));
-  $('flow').innerHTML = [queueNode, ...cards(build, num), gateNode, ...cards(deploy, state.deployRow), liveNode].join(arrow);
+  // A deploy waiting for a Promote click ("autoPromote": false) gets its own gate, just before the stage it waits at.
+  const deployCards = cards(deploy, state.deployRow), pr = state.promote;
+  if (pr) {
+    const at = deploy.findIndex((s) => s.status === 'held');
+    const col = deploy.slice(0, at + 1).filter((s) => !s.parallel).length - 1;
+    deployCards.splice(Math.max(col, 0), 0, `<div class="node gate" role="group" aria-label="Promote">
+      <span class="top">${icon('held')}Promote to ${esc(pr.environment)}</span>
+      <button class="btn primary" id="promote">Promote build #${pr.number}</button>
+      <p>Build #${pr.number} passed every stage before ${esc(pr.environment)}. It waits here until you promote it.</p>
+    </div>`);
+  }
+  $('flow').innerHTML = [queueNode, ...cards(build, num), gateNode, ...deployCards, liveNode].join(arrow);
   fade();
   $('stopBuild').hidden = !busy;
   $('stopDeploy').hidden = !state.deploying;
@@ -325,7 +373,7 @@ function drawHistory() {
   const env = esc(state.config.environment);
   $('history').innerHTML = state.builds.length ? state.builds.map((b) => `<li>
       <button class="hrow" data-build="${b.number}" aria-expanded="${openBuild === b.number}">
-        <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + env : where[b.status] ?? b.status}</span></span>
+        <b>#${b.number}</b><span><span class="chip ${b.status}">${b.status === 'live' ? 'Live in ' + esc(state.lives.filter((l) => l.live?.number === b.number).map((l) => l.environment).join(', ') || state.config.environment) : where[b.status] ?? b.status}</span></span>
         <span class="what">${b.by ? `<span class="tag" title="Started by an agent">by ${esc(b.by)}</span> ` : ''}${b.rollbackOf ? `Rollback to #${b.rollbackOf}: ` : ''}${b.prs.length ? b.prs.map((p) => `#${p.number} ${esc(p.title)}`).join(', ') : `${esc(state.config.branch)} as it was, no PRs`}</span>
         <time>${new Date(b.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</time>
       </button>
@@ -431,12 +479,25 @@ $('flow').addEventListener('click', (e) => {
   if (e.target.closest('#deploy')) {
     const what = state.picked.length ? `merge PR ${state.picked.map((x) => '#' + x).join(', ')} on GitHub and deploy` : `deploy ${state.config.branch}`;
     const when = state.buildOk && !state.deploying ? '' : ' once it is ready';
-    if (confirm(`This will ${what} to ${state.config.environment}${when}. Go?`)) post('/api/deploy');
+    if (confirm(`This will ${what} to ${firstEnv()}${when}. Go?`)) post('/api/deploy');
     return;
   }
   const rm = e.target.closest('[data-remove]');
   if (rm) return post('/api/queue', { action: 'remove', number: Number(rm.dataset.remove) });
   if (e.target.closest('#resume')) return post('/api/queue', { action: 'resume' });
+  if (e.target.closest('#promote')) {
+    const p = state.promote;
+    if (p && confirm(`Promote build #${p.number} to ${p.environment}? Its ${p.environment} stages run now.`)) post('/api/promote', p);
+    return;
+  }
+  const bl = e.target.closest('[data-block]');
+  if (bl) {
+    const reason = prompt(`Block deploys to ${bl.dataset.block}? Builds wait before ${bl.dataset.block} until you unblock it. Say why, for whoever sees it:`, '');
+    if (reason?.trim()) post('/api/block', { environment: bl.dataset.block, reason: reason.trim() });
+    return;
+  }
+  const ub = e.target.closest('[data-unblock]');
+  if (ub) return post('/api/block', { environment: ub.dataset.unblock, action: 'unblock' });
   const card = e.target.closest('.stage');
   if (card) { selected = card.dataset.id; viewing = null; render(); }
 });
