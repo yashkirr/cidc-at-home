@@ -43,6 +43,32 @@ It works with any GitHub repo. You describe your stages in a small `pipeline.jso
 
 Full detail: [How it works](docs/how-it-works.md).
 
+## The pipeline at a glance
+
+A build moves left to right. This one uses the staging-then-prod setup [below](#staging-bake-time-and-health-gates).
+
+```mermaid
+flowchart LR
+  B[Batch PRs] --> C[Checks] --> D{{Deploy}} --> HS{{Blockers}} --> M[Merge] --> S[Staging] --> GS{{Health gates}} --> HP{{Approval}} --> P[Prod] --> GP{{Health gates}} --> L([Live])
+  classDef wait fill:#fff4d6,stroke:#b8860b,color:#222
+  class D,HS,GS,HP,GP wait
+```
+
+- **Square boxes** run your commands: your build stages (checks), the merge, then each environment's deploy stages.
+  **Yellow six-sided boxes** wait or check before the build may go on.
+- **Deploy** happens on its own once checks pass, or waits for a click with `"autoDeploy": false`. Green builds queue
+  behind the one deploying.
+- **Blockers** and **Approval** hold the build at the door of an environment. Each door checks, in order: a block
+  someone set on that environment's Live card (with a reason), a **Promote** click when `"autoPromote": false`, then
+  the deploy window. Here staging has no Promote step and prod does. The first environment's door comes before the
+  merge, so nothing merges into a closed environment.
+- **Health gates** wait the bake time and check the alarms, URLs or commands at the start, every 30 seconds and at the end. If a gate says
+  the environment is unhealthy, it rolls back to the build that was live there before and the queue pauses.
+- **A build that fails its checks** never deploys. **A failed deploy stage** stops the line there and pauses the
+  queue until you press **Resume queue**. You can retry it.
+- Without `environments`, there are no health gates, Promote clicks or windows, but blocks still hold a build:
+  build stages, merge, deploy stages, live.
+
 ## Quick start
 
 You need [Node.js 22](https://nodejs.org/), git and the [GitHub CLI](https://cli.github.com/), signed in with
