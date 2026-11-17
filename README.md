@@ -17,7 +17,14 @@ What goes live is always what is on main, and always something that passed your 
 
 It works with any GitHub repo. You describe your stages in a small `pipeline.json` file in that repo.
 
-![The pipeline page after a green build](docs/screenshot.png)
+The pipeline page, left to right. Build #2 (PRs #42 and #43) has passed its checks:
+
+![Deploy queue, Batch PRs, Install, Checks and Build, all passed for build #2](docs/screenshot-build.png)
+
+It merged, went to staging and passed staging's health gates. Now it waits for a Promote click before prod, while
+build #1 stays live in prod. Staging is blocked for a load test, so the next build will wait before it:
+
+![Merge, Deploy staging, Bake staging, the Promote to prod button, Deploy prod waiting, and the Live cards for staging (blocked) and prod](docs/screenshot-deploy.png)
 
 ## What it does
 
