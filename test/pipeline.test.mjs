@@ -367,7 +367,10 @@ test('staging bakes behind its gates, prod waits for promote and blocks, a tripp
     assert.equal(state.deployRow, 4, 'nothing deployed');
   } finally {
     events?.body.cancel().catch(() => {});
+    // Wait for it to exit: it can still be writing to home, which made rmSync fail with ENOTEMPTY.
+    const gone = new Promise((r) => (server.exitCode !== null || server.signalCode !== null ? r() : server.once('exit', r)));
     server.kill();
+    await gone;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
