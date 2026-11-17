@@ -2,19 +2,46 @@
 
 Your own CI/CD pipeline, running on your own machine. No GitHub Actions minutes, no runners to rent.
 
+The aim is an open source CI/CD tool you could run a company on, built the way large release pipelines work:
+every change goes out as a numbered build, through test stages and staging before prod, with bake times, health
+gates watching your alarms, automatic rollback, and deploy windows.
+
 It is a small web page that does two things:
 
 1. **Build** (one click). It takes your main branch, merges in the open pull requests you tick, and runs your
    checks on the result: lint, tests, build, whatever your repo needs. You watch every stage and step pass or fail.
-2. **Deploy** (on its own once a build is green; `"autoDeploy": false` gives you a button instead). It merges those pull requests on GitHub, checks that main now
-   has exactly the code that was tested, then runs your deploy steps. While it deploys, you can already build the
-   next batch, stacked on the one going out, so it is ready to deploy the moment this one finishes.
+2. **Deploy** (on its own once a build is green; `"autoDeploy": false` gives you a button instead). It merges those
+   pull requests on GitHub, checks that main now has exactly the code that was tested, then runs your deploy steps.
 
 What goes live is always what is on main, and always something that passed your checks.
 
 It works with any GitHub repo. You describe your stages in a small `pipeline.json` file in that repo.
 
 ![The pipeline page after a green build](docs/screenshot.png)
+
+## What it does
+
+- **Numbered builds.** Every batch of pull requests is a build (#1, #2, ...). The page shows each one moving left to
+  right: queue, build, checks, then each deploy stage.
+- **Stacked builds.** Start the next build as soon as the one in front has batched its PRs. It is built on top of
+  that one, in its own private copy. Up to 10 builds can be in flight. If one fails its checks, the builds stacked on
+  it are marked bad.
+- **Deploy queue.** Deploys go one at a time, oldest first. Green builds wait in the queue and ship on their own.
+  A failed deploy pauses the queue until you press **Resume queue**.
+- **All builds.** Every build, its PRs, when it was built and where it is now. Saved across restarts.
+- **Rollback.** "Roll back" on any build that was live rebuilds that build's commit and runs only the deploy stages.
+  Main is never rewritten, and the queue pauses until you resume it.
+- **Retry a failed stage.** Fix the cause and press **Retry**: the failed deploy stage and the ones after it run
+  again, same build, same folder, nothing merged twice. A stage can [skip the steps that already passed](#resuming-a-retried-stage).
+- **Survives a restart.** Build numbers, what is live and the last deploy's stage results are saved to disk. A stage
+  that was running when the app stopped shows as Stopped and can be retried. Builds still building or queued are lost.
+- **One Live card per environment.** Each deploy stage says which environment it makes live (the site to prod, the
+  app to TestFlight). Each environment shows the build live there, so a failed app upload never holds back the site.
+- **Promotion.** Staging before prod, bake time, health gates (CloudWatch alarms, a health URL, or any command),
+  automatic rollback when a gate fails, a **Promote** button, **Block deploys** for a code freeze, and deploy windows.
+- **Agents.** Claude Code can read the pipeline, fix a failing PR and build again. Every agent call is logged.
+
+Full detail: [How it works](docs/how-it-works.md).
 
 ## Quick start
 
@@ -31,6 +58,18 @@ On a Mac you can double-click `start.command` instead. Your browser opens http:/
 window open while you use it. Close it to stop.
 
 Then add a `pipeline.json` to your repo (see below), tick the pull requests you want, and press **Build**.
+
+### After you update it
+
+The app reads `server.mjs` and the page once, when it starts. `batch.sh` and `merge.sh` are read fresh by each build.
+So after a `git pull`:
+
+1. Wait for any running build or deploy to finish.
+2. Stop the app (Ctrl+C, or close its window) and start it again.
+3. The open page reloads itself when it sees the new server. If it looks stuck (ticks you can't change), hard-refresh
+   it: Cmd+Shift+R on a Mac, Ctrl+Shift+R elsewhere.
+
+A restart forgets builds that were still building or queued, so build them again.
 
 ## pipeline.json
 
@@ -54,10 +93,79 @@ Put this at the root of each repo you want to build and deploy:
 Each stage is a shell command. It passes when it exits with 0. Any line it prints that starts with `== ` shows up as a
 step under the stage, so `echo "== Lint"` gives you a "Lint" step with its own tick.
 
-Want staging before prod, a bake time, CloudWatch alarms as health gates with automatic rollback, a Promote button,
-deploy hours or a code-freeze block? Add `environments`: see
-[Promotion](docs/pipeline-json.md#promotion-staging-bake-time-and-health-gates) and
-[examples/staging-then-prod.json](examples/staging-then-prod.json).
+| Field | Default | What it does |
+|---|---|---|
+| `branch` | `main` | The branch you release from. |
+| `environment` | `prod` | Where deploy stages go, unless a stage names its own. |
+| `build` | none | Stages run on each batch, in order. |
+| `deploy` | none | Stages run after the merge, in order. |
+| `autoDeploy` | `true` | `false`: a **Deploy** button instead of shipping green builds on their own. |
+| `environments` | none | Promotion rules per environment (below). |
+
+Each stage has a `name` and a `run` command, and can add `env` (extra variables), `parallel: true` (start beside the
+stage before it), and on deploy stages `environment` (the environment it makes live).
+
+### More than one environment
+
+Here the website goes to prod and the iOS app to TestFlight, side by side. Each gets its own Live card, and a failed
+app upload doesn't stop the site going live:
+
+```json
+{
+  "environment": "prod",
+  "build": [{ "name": "Checks", "run": "bash scripts/check.sh" }],
+  "deploy": [
+    { "name": "Website", "run": "bash scripts/release.sh" },
+    { "name": "iOS app", "run": "eas build -p ios --auto-submit --no-wait", "parallel": true, "environment": "TestFlight" }
+  ]
+}
+```
+
+### Staging, bake time and health gates
+
+List an environment under `environments` to make it a promotion step. After its stages pass it bakes: the app waits
+the bake time and checks its gates at the start, every 30 seconds and at the end. If a gate fails, that environment
+rolls back to the build that was live there before and the queue pauses.
+
+```json
+{
+  "environment": "prod",
+  "build": [{ "name": "Checks", "run": "npm ci && npm test" }],
+  "deploy": [
+    { "name": "Deploy staging", "environment": "staging", "run": "bash scripts/deploy.sh staging" },
+    { "name": "Deploy prod", "run": "bash scripts/deploy.sh prod" }
+  ],
+  "environments": {
+    "staging": {
+      "bake": "15m",
+      "gates": [
+        { "alarms": ["staging-5xx", "staging-p99-latency"], "region": "eu-west-1" },
+        { "url": "https://staging.example.com/health" }
+      ]
+    },
+    "prod": {
+      "bake": "30m",
+      "gates": [{ "alarms": ["prod-5xx"] }, { "run": "bash scripts/smoke.sh" }],
+      "autoPromote": false,
+      "windows": [{ "days": "mon-fri", "from": "09:00", "to": "22:00" }],
+      "timezone": "Europe/London"
+    }
+  }
+}
+```
+
+| Field | Default | What it does |
+|---|---|---|
+| `bake` | none | How long to watch after deploying: `"30s"`, `"15m"`, `"2h"` (a plain number is minutes). |
+| `gates` | none | Health checks: CloudWatch `alarms` (read with the AWS CLI), a `url` that must answer 2xx/3xx, or a `run` command that must exit 0. |
+| `rollback` | `true` | `false`: a failed gate only pauses the queue. |
+| `autoPromote` | `true` | `false`: each build waits for a **Promote** click before this environment. |
+| `windows` | any time | When builds may go into this environment. |
+| `timezone` | your machine's | The time zone for `windows`. |
+
+`branch`, `autoDeploy` and `environments` are read from your own checkout when the app opens the repo, so a pull
+request can't loosen them. Restart the app after changing them. You can also **Block deploys** to an environment from
+its Live card, with a reason, until you unblock it.
 
 ### Resuming a retried stage
 
