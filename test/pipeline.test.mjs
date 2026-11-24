@@ -88,18 +88,23 @@ esac
     assert.match(log.stages[0].log.join('\n'), /PR #3 clashes/);
     assert.match(await tool('build_log', { build: seen.build.number, stage: 'nope' }), /no stage "nope"/);
     assert.match(await tool('retry_stage', { build: seen.build.number }), /Only a failed stage/);
-    // Claude names the repo it means (the page follows), but only while the open one has nothing running or queued.
+    // A second repo gets its own pipeline, beside this one. With two, Claude names the repo it means.
     sh(tmp, 'git clone -q remote.git repo2');
     assert.equal((await post('/api/repo', { path: join(tmp, 'repo2') })).status, 200);
-    assert.equal((await post('/api/repo', { path: repo })).status, 200);
-    assert.deepEqual(await tool('list_repos', {}), { open: 'repo', repos: ['repo', 'repo2'] });
+    // A folder without a pipeline.json is refused and never joins the list; an unknown repo can't take the app down.
+    sh(tmp, 'git init -q bad');
+    assert.equal((await post('/api/repo', { path: join(tmp, 'bad') })).status, 400);
+    assert.equal((await fetch(base + '/events?repo=nope')).status, 400);
+    assert.deepEqual((await tool('list_repos', {})).map((r) => r.name), ['repo', 'repo2']);
     assert.match(await tool('pipeline_status', { repo: 'nope' }), /No repo "nope"/);
+    assert.match(await tool('pipeline_status', {}), /Name the repo: repo, repo2/);
     assert.equal((await tool('pipeline_status', { repo: 'repo2' })).name, 'repo2');
     assert.equal((await tool('pipeline_status', { repo: 'repo' })).name, 'repo');
-    assert.equal((await post('/api/prs', { shown: join(tmp, 'repo2') })).status, 409, 'a click from a page showing another repo is refused');
 
-    assert.deepEqual(await tool('build', { prs: [1] }), { ok: true }, 'Claude builds again once the clash is gone');
-    assert.match(await tool('pipeline_status', { repo: 'repo2' }), /running build or deploy/, 'no switch away from a running build');
+    assert.deepEqual(await tool('build', { prs: [1], repo: 'repo' }), { ok: true }, 'Claude builds again once the clash is gone');
+    const other = await tool('pipeline_status', { repo: 'repo2' });
+    assert.equal(other.building, false, 'repo2 is not touched by repo\'s build');
+    assert.equal(other.build.number, null);
     mcp.kill();
     // Audit trail: the agent's key can't deploy, and every call, refused ones too, is logged with the agent's name.
     const agentKey = JSON.parse(sh(home, 'cat .cicd-at-home/mcp.json')).token;
@@ -108,11 +113,11 @@ esac
     for (let i = 0; i < 50 && !sh(home, 'cat .cicd-at-home/agent-log.jsonl').includes('rogue'); i++) await new Promise((r) => setTimeout(r, 100));
     const audit = sh(home, 'cat .cicd-at-home/agent-log.jsonl').trim().split('\n').map((l) => JSON.parse(l));
     assert.deepEqual(audit.map((a) => [a.agent, a.action, a.ok]), [['claude-code 2.1', 'status', true], ['claude-code 2.1', 'build-log', true], ['claude-code 2.1', 'build-log', true],
-      ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'status', false], ['claude-code 2.1', 'status', true],
-      ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['claude-code 2.1', 'status', false], ['rogue', 'deploy', false]]);
-    assert.equal(audit[6].args.repo, 'repo2');
-    assert.equal(audit[9].build, 2);
-    assert.equal(audit[11].refused, true);
+      ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'repos', true], ['claude-code 2.1', 'status', false], ['claude-code 2.1', 'status', false],
+      ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['claude-code 2.1', 'status', true], ['rogue', 'deploy', false]]);
+    assert.equal(audit[7].repo, 'repo2');
+    assert.equal(audit[10].build, 2);
+    assert.equal(audit[12].refused, true);
     await until((s) => s.builds.find((b) => b.number === 2)?.by === 'claude-code 2.1', 'build #2 marked as the agent\'s');
     await until((s) => s.buildOk, 'green build');
     assert.deepEqual(state.stages.find((s) => s.name === 'Checks').steps.map((s) => [s.name, s.status]), [['Lint', 'passed'], ['Tests', 'passed']]);
@@ -373,7 +378,7 @@ test('staging bakes behind its gates, prod waits for promote and blocks, a tripp
     assert.equal(state.builds.find((b) => b.number === 5), undefined, 'no rollback build');
 
     // A pull request can't rename its environment to get past the rules set for it in your checkout.
-    sh(repo, `sed -i 's/"staging"/"stage"/g' pipeline.json && git -c user.name=t -c user.email=t@t commit -qam rename && git push -q origin main`);
+    sh(repo, `sed -i.bak 's/"staging"/"stage"/g' pipeline.json && rm -f pipeline.json.bak && git -c user.name=t -c user.email=t@t commit -qam rename && git push -q origin main`);
     await ok(await post('/api/queue', { action: 'resume' }));
     await ok(await post('/api/build', { prs: [] }));
     await until((s) => s.build.number === 5 && s.build.status === 'bad', 'build #5 refused');

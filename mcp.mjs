@@ -24,14 +24,13 @@ async function call(path, body = {}) {
 }
 
 const num = { type: 'integer', minimum: 1 };
-// Every tool but list_repos acts on one repo: the one named here, or the one the page has open. Naming another opens it
-// (the page follows), and only when the open repo has nothing running or queued.
-const repo = { type: 'string', description: 'The repo to act on, by folder name from list_repos. Leave out for the one open now.' };
+// Each repo has its own pipeline, running on its own. Every tool but list_repos acts on one: the one named here.
+const repo = { type: 'string', description: 'Which repo\'s pipeline, by folder name from list_repos. Needed when the pipeline has more than one repo.' };
 const tools = {
   list_repos: {
-    description: 'The repos the pipeline knows (folder names), and which one is open now. Pass one as repo to the other tools.',
+    description: 'Each repo the pipeline has, with what its pipeline is doing now: building, deploying, queued builds, a paused queue, the live build, any error. Pass a name as repo to the other tools.',
     inputSchema: { type: 'object', properties: {} },
-    run: async () => { const v = await call('/api/status'); return { open: v?.name ?? null, repos: (v?.repos ?? []).map((r) => r.split('/').pop()) }; },
+    run: () => call('/api/repos'),
   },
   pipeline_status: {
     description: 'What the pipeline is doing now: open PRs, the newest build and its stages (status and steps), the deploy queue, what is live in each environment, any error, and recent builds. Start here when a build or deploy failed. A failed "batch" stage means picked PRs clash; its steps name them.',

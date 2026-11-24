@@ -235,10 +235,12 @@ failed, reads the log, fixes the PR branch, pushes, and builds again. Its tools:
 `build`, `retry_stage` and `resume_queue`. A build it starts deploys on its own once green, like any build (unless
 pipeline.json sets `"autoDeploy": false`). It can't roll back, stop or change the queue: those stay a click on the page.
 
-`list_repos` names the repos the app knows, and every other tool takes an optional `repo` (one of those names), so
-Claude can act on any of them from one session. Naming a repo that isn't open opens it, and the page follows. That
-happens only while the open repo has nothing running or queued. Otherwise the call is refused, so a switch never drops
-a build or deploy in progress. Adding a new repo stays a click on the page.
+Each repo you add gets its own pipeline: its own builds, queue, deploys and live builds, running side by side with the
+others. The repo picker on the page only changes which one you are looking at (`?repo=` in the address), so you can
+keep a tab open per repo. `list_repos` shows Claude each repo and what its pipeline is doing, and every other tool takes
+`repo` (needed once there is more than one), so Claude never acts on a repo it did not name. Adding a new repo stays a
+click on the page. There is no limit on how many repos build at once: they share your machine, so heavy builds in two
+repos at the same time each run slower.
 
 Every call an agent makes, reads and refused ones too, is logged with the agent's name, the action, its arguments,
 the time and the result in `~/.cicd-at-home/agent-log.jsonl`. The page shows them under Agent activity, and builds an
