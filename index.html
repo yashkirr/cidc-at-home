@@ -184,11 +184,14 @@ const profile = $('profile');
 try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
 profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
 
+// Each repo has its own pipeline; this page shows one (?repo=) and every click is for that one.
+const SHOWN = new URLSearchParams(location.search).get('repo');
+const show = (repo) => { location.search = '?repo=' + encodeURIComponent(repo); };
 async function post(path, body = {}) {
-  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify(body) });
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify({ repo: state?.repo ?? SHOWN ?? undefined, ...body }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) showError(j.error || 'That did not work.');
-  return r.ok;
+  return r.ok && j;
 }
 function showError(text) { const e = $('error'); e.textContent = text || ''; e.hidden = !text; }
 
@@ -420,12 +423,12 @@ $('history').addEventListener('click', async (e) => {
   const n = Number(row.dataset.build);
   if (openBuild === n) { openBuild = null; render(); return; }
   openBuild = n; buildStages = [];
-  const r = await fetch('/api/build-log', { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify({ number: n }) });
+  const r = await fetch('/api/build-log', { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify({ number: n, repo: state?.repo ?? SHOWN ?? undefined }) });
   if (r.ok) buildStages = (await r.json()).stages;
   render();
 });
 
-new EventSource('/events').onmessage = (e) => {
+new EventSource('/events' + (SHOWN ? '?repo=' + encodeURIComponent(SHOWN) : '')).onmessage = (e) => {
   const m = JSON.parse(e.data);
   if (m.type === 'state') {
     // The server was restarted (maybe updated): this page's token and code are stale, so start over.
@@ -510,8 +513,8 @@ $('retry').addEventListener('click', () => {
 $('stopBuild').addEventListener('click', () => post('/api/stop', { lane: 'build' }));
 $('stopDeploy').addEventListener('click', () => post('/api/stop', { lane: 'deploy' }));
 $('refresh').addEventListener('click', () => post('/api/prs'));
-$('repo').addEventListener('change', (e) => { picked.clear(); post('/api/repo', { path: e.target.value }); });
-$('addForm').addEventListener('submit', (e) => { e.preventDefault(); const p = $('addPath').value.trim(); if (p) post('/api/repo', { path: p }).then((ok) => ok && ($('addPath').value = '')); });
+$('repo').addEventListener('change', (e) => show(e.target.value)); // only what this page shows: the others keep running
+$('addForm').addEventListener('submit', (e) => { e.preventDefault(); const p = $('addPath').value.trim(); if (p) post('/api/repo', { path: p, repo: undefined }).then((j) => j && show(j.repo)); });
 </script>
 </body>
 </html>
