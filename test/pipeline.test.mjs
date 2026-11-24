@@ -96,6 +96,7 @@ esac
     assert.match(await tool('pipeline_status', { repo: 'nope' }), /No repo "nope"/);
     assert.equal((await tool('pipeline_status', { repo: 'repo2' })).name, 'repo2');
     assert.equal((await tool('pipeline_status', { repo: 'repo' })).name, 'repo');
+    assert.equal((await post('/api/prs', { shown: join(tmp, 'repo2') })).status, 409, 'a click from a page showing another repo is refused');
 
     assert.deepEqual(await tool('build', { prs: [1] }), { ok: true }, 'Claude builds again once the clash is gone');
     assert.match(await tool('pipeline_status', { repo: 'repo2' }), /running build or deploy/, 'no switch away from a running build');

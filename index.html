@@ -185,7 +185,8 @@ try { profile.value = localStorage.getItem('pipeline:profile') || ''; } catch {}
 profile.addEventListener('change', () => { try { localStorage.setItem('pipeline:profile', profile.value.trim()); } catch {} });
 
 async function post(path, body = {}) {
-  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify(body) });
+  // shown: the repo on screen, so a click never lands on a repo Claude switched to meanwhile (the server refuses it).
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-token': TOKEN }, body: JSON.stringify({ shown: state?.repo, ...body }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) showError(j.error || 'That did not work.');
   return r.ok;

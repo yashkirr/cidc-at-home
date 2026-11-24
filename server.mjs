@@ -771,6 +771,10 @@ const server = http.createServer(async (req, res) => {
     if (agent && !(['/api/status', '/api/prs', '/api/build', '/api/build-log', '/api/retry'].includes(url.pathname) || (url.pathname === '/api/queue' && b.action === 'resume'))) {
       return json(res, 403, { error: (res.agentError = "Agents can't do that. Deploy, rollback, stop and queue changes stay a click on the page.") });
     }
+    // The page says which repo it shows; if Claude opened another since, refuse rather than act on the wrong one.
+    if (!agent && b.shown != null && url.pathname !== '/api/repo' && state && b.shown !== state.repo) {
+      return json(res, 409, { error: `The pipeline switched to ${state.name} since this page loaded. Check it, then try again.` });
+    }
     if (agent && b.repo != null) {
       const was = state?.repo, dir = agentRepo(String(b.repo));
       if (dir !== was) await loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`));
