@@ -233,8 +233,23 @@ function history() {
 }
 const summary = (r) => r && { number: r.number, prs: r.prs, status: status(r), bad: r.bad, building: r.stages.some((s) => s.group === 'build' && s.status === 'running') };
 
+// An agent names the repo it means (folder name or path, from list_repos). Opening another one replaces the page's
+// pipeline, so it waits until the open repo has nothing running or queued: switching would drop that work.
+function agentRepo(name) {
+  const found = repos.filter((r) => r === name || basename(r) === name);
+  if (found.length > 1) throw new Error(`"${name}" matches more than one repo: ${found.join(', ')}. Pass the full path.`);
+  const [dir] = found;
+  if (!dir) throw new Error(`No repo "${name}" in the pipeline. It has: ${repos.map((r) => basename(r)).join(', ') || 'none'}.`);
+  if (dir === state?.repo) return dir;
+  // A paused queue or a green build waiting for Deploy lives only in memory: switching would drop it.
+  if (state?.queue.length || state?.paused || state?.build.buildOk) throw new Error(`${state.name} has a build queued, a green build waiting, or a paused queue. Deal with it there first, then try again.`);
+  openRepo(dir);
+  return dir;
+}
+
 function openRepo(dir) {
-  if (children().length) throw new Error('Wait for the running stage to finish, or stop it.');
+  // deploying(): a deploy waiting out a bake or a hold runs no process, but still writes to the open repo's state.
+  if (children().length || deploying() || building()) throw new Error('Wait for the running build or deploy to finish, or stop it.');
   const config = readConfig(dir);
   const id = `${basename(dir)}-${createHash('sha256').update(dir).digest('hex').slice(0, 10)}`;
   const work = join(HOME, 'work', id), recordFile = join(HOME, `builds-${id}.json`), deployFile = join(HOME, `deploy-${id}.json`);
@@ -277,9 +292,11 @@ function view(withLogs = false) {
 }
 
 async function loadPrs() {
+  const mine = state; // a switch while gh runs must not put this repo's PRs on another one
   // Only PRs into the pipeline's branch, from this repo itself: fork PRs would run a stranger's code with your keys.
   const out = await capture('gh', ['api', `repos/{owner}/{repo}/pulls?state=open&per_page=100&base=${state.config.branch}`, '--jq',
     '[.[] | select(.head.repo.full_name == .base.repo.full_name) | {number, title, draft, branch: .head.ref, author: .user.login}]'], state.repo);
+  if (state !== mine) return;
   state.prs = JSON.parse(out);
   send({ type: 'state', state: view() });
 }
@@ -747,12 +764,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || (req.headers['x-token'] !== TOKEN && !agent)) return json(res, 403, { error: 'Not allowed.' });
     let b = null, made = null;
     // Only the fields the actions read are kept, so a huge or odd body can't bloat the log.
-    if (agent) res.on('close', () => audit({ at: Date.now(), agent, repo: state?.name ?? null, action: url.pathname.replace('/api/', ''), args: b && { number: b.number, prs: b.prs, action: b.action }, ok: res.writableFinished && res.statusCode < 400, refused: res.statusCode === 403, error: res.agentError ?? null, build: made }));
+    if (agent) res.on('close', () => audit({ at: Date.now(), agent, repo: state?.name ?? null, action: url.pathname.replace('/api/', ''), args: b && { repo: b.repo, number: b.number, prs: b.prs, action: b.action }, ok: res.writableFinished && res.statusCode < 400, refused: res.statusCode === 403, error: res.agentError ?? null, build: made }));
     b = await body(req);
     if (!b || typeof b !== 'object') b = {};
-    // What agents can do: read, build, retry, resume. Deploy, rollback, stop, queue changes and repos stay clicks on the page.
+    // What agents can do: read, build, retry, resume, each in a repo they name. Deploy, rollback, stop, queue changes and adding repos stay clicks on the page.
     if (agent && !(['/api/status', '/api/prs', '/api/build', '/api/build-log', '/api/retry'].includes(url.pathname) || (url.pathname === '/api/queue' && b.action === 'resume'))) {
       return json(res, 403, { error: (res.agentError = "Agents can't do that. Deploy, rollback, stop and queue changes stay a click on the page.") });
+    }
+    if (agent && b.repo != null) {
+      const was = state?.repo, dir = agentRepo(String(b.repo));
+      if (dir !== was) await loadPrs().catch((e) => (state.error = `Could not list PRs: ${e.message}`));
+      // Another call may have opened a different repo while the PR list loaded: never act on the wrong one.
+      if (state?.repo !== dir) throw new Error(`Another call switched the pipeline to ${state?.name} meanwhile. Try again.`);
     }
     switch (url.pathname) {
       case '/api/status': return json(res, 200, view()); // for mcp.mjs: Claude reads the pipeline
@@ -788,7 +811,7 @@ const server = http.createServer(async (req, res) => {
       case '/api/build-log': {
         // Stages and logs of any build from this run of the app (the pipeline only shows the newest).
         const r = state?.runs.get(Number(b.number));
-        if (!r) throw new Error('Logs are only kept while the app runs. This build is from before a restart.');
+        if (!r) throw new Error('Logs are only kept while the app runs and the repo stays open. This build is from before a restart or a switch.');
         return json(res, 200, { number: r.number, stages: r.stages.map(({ env, run, ...s }) => s) });
       }
       case '/api/rollback':

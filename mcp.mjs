@@ -24,17 +24,25 @@ async function call(path, body = {}) {
 }
 
 const num = { type: 'integer', minimum: 1 };
+// Every tool but list_repos acts on one repo: the one named here, or the one the page has open. Naming another opens it
+// (the page follows), and only when the open repo has nothing running or queued.
+const repo = { type: 'string', description: 'The repo to act on, by folder name from list_repos. Leave out for the one open now.' };
 const tools = {
+  list_repos: {
+    description: 'The repos the pipeline knows (folder names), and which one is open now. Pass one as repo to the other tools.',
+    inputSchema: { type: 'object', properties: {} },
+    run: async () => { const v = await call('/api/status'); return { open: v?.name ?? null, repos: (v?.repos ?? []).map((r) => r.split('/').pop()) }; },
+  },
   pipeline_status: {
     description: 'What the pipeline is doing now: open PRs, the newest build and its stages (status and steps), the deploy queue, what is live in each environment, any error, and recent builds. Start here when a build or deploy failed. A failed "batch" stage means picked PRs clash; its steps name them.',
-    inputSchema: { type: 'object', properties: {} },
-    run: async () => { const v = await call('/api/status'); return v && { ...v, builds: v.builds?.slice(0, 10) }; },
+    inputSchema: { type: 'object', properties: { repo } },
+    run: async (a) => { const v = await call('/api/status', a); return v && { ...v, builds: v.builds?.slice(0, 10) }; },
   },
   build_log: {
     description: `Stages of one build from this run of the app, with the last ${TAIL} log lines of each. Use the build number from pipeline_status. Pass stage (its id or name) to get one stage only.`,
-    inputSchema: { type: 'object', properties: { build: num, stage: { type: 'string' } }, required: ['build'] },
-    run: async ({ build, stage }) => {
-      const { number, stages } = await call('/api/build-log', { number: build });
+    inputSchema: { type: 'object', properties: { build: num, stage: { type: 'string' }, repo }, required: ['build'] },
+    run: async ({ build, stage, repo }) => {
+      const { number, stages } = await call('/api/build-log', { number: build, repo });
       const picked = stage ? stages.filter((s) => s.id === stage || s.name === stage) : stages;
       if (!picked.length) throw new Error(`Build #${number} has no stage "${stage}". Stages: ${stages.map((s) => s.name).join(', ')}.`);
       return { number, stages: picked.map((s) => ({ ...s, log: s.log?.slice(-TAIL) })) };
@@ -42,19 +50,19 @@ const tools = {
   },
   build: {
     description: 'Start a build: main plus these PR numbers, merged and checked. Same as ticking them and pressing Build. Use it after fixing a clash or a failing check (push the fix to the PR branch first). Once every check passes it deploys on its own (unless the repo\'s pipeline.json sets "autoDeploy": false), so only build what should go live.',
-    inputSchema: { type: 'object', properties: { prs: { type: 'array', items: num, minItems: 1 } }, required: ['prs'] },
-    // Fresh PR list first, so a PR opened since is pickable. If gh is down, the list the app has will do.
-    run: async ({ prs }) => { await call('/api/prs').catch(() => {}); return call('/api/build', { prs }); },
+    inputSchema: { type: 'object', properties: { prs: { type: 'array', items: num, minItems: 1 }, repo }, required: ['prs'] },
+    // Fresh PR list first (in the named repo, which opens it), so a PR opened since is pickable. If gh is down, the list the app has will do.
+    run: async ({ prs, repo }) => { await call('/api/prs', { repo }).catch(() => {}); return call('/api/build', { prs, repo }); }, // a refused switch fails the build call too
   },
   retry_stage: {
     description: 'Run the failed stage of the last deploy again, and the stages after it, on the same build. Nothing is merged again. Pass that deploy\'s build number (deployRow in pipeline_status). The queue stays paused until resume_queue.',
-    inputSchema: { type: 'object', properties: { build: num }, required: ['build'] },
-    run: ({ build }) => call('/api/retry', { number: build }),
+    inputSchema: { type: 'object', properties: { build: num, repo }, required: ['build'] },
+    run: ({ build, repo }) => call('/api/retry', { number: build, repo }),
   },
   resume_queue: {
     description: 'Unpause the deploy queue after a failed deploy, so queued builds deploy again. Only do this once the cause is fixed or the user says so.',
-    inputSchema: { type: 'object', properties: {} },
-    run: () => call('/api/queue', { action: 'resume' }),
+    inputSchema: { type: 'object', properties: { repo } },
+    run: ({ repo }) => call('/api/queue', { action: 'resume', repo }),
   },
 };
 

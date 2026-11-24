@@ -81,15 +81,24 @@ esac
     const rpc = (method, params) => new Promise((res) => { replies.set(++mid, res); mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: mid, method, params }) + '\n'); });
     const tool = async (name, args) => { const r = (await rpc('tools/call', { name, arguments: args })).result; return r.isError ? r.content[0].text : JSON.parse(r.content[0].text); };
     assert.equal((await rpc('initialize', { protocolVersion: '2025-06-18', clientInfo: { name: 'claude-code', version: '2.1' } })).result.serverInfo.name, 'cicd-at-home');
-    assert.deepEqual((await rpc('tools/list')).result.tools.map((t) => t.name), ['pipeline_status', 'build_log', 'build', 'retry_stage', 'resume_queue']);
+    assert.deepEqual((await rpc('tools/list')).result.tools.map((t) => t.name), ['list_repos', 'pipeline_status', 'build_log', 'build', 'retry_stage', 'resume_queue']);
     const seen = await tool('pipeline_status', {});
     assert.equal(seen.stages[0].status, 'failed');
     const log = await tool('build_log', { build: seen.build.number, stage: 'batch' });
     assert.match(log.stages[0].log.join('\n'), /PR #3 clashes/);
     assert.match(await tool('build_log', { build: seen.build.number, stage: 'nope' }), /no stage "nope"/);
     assert.match(await tool('retry_stage', { build: seen.build.number }), /Only a failed stage/);
+    // Claude names the repo it means (the page follows), but only while the open one has nothing running or queued.
+    sh(tmp, 'git clone -q remote.git repo2');
+    assert.equal((await post('/api/repo', { path: join(tmp, 'repo2') })).status, 200);
+    assert.equal((await post('/api/repo', { path: repo })).status, 200);
+    assert.deepEqual(await tool('list_repos', {}), { open: 'repo', repos: ['repo', 'repo2'] });
+    assert.match(await tool('pipeline_status', { repo: 'nope' }), /No repo "nope"/);
+    assert.equal((await tool('pipeline_status', { repo: 'repo2' })).name, 'repo2');
+    assert.equal((await tool('pipeline_status', { repo: 'repo' })).name, 'repo');
 
     assert.deepEqual(await tool('build', { prs: [1] }), { ok: true }, 'Claude builds again once the clash is gone');
+    assert.match(await tool('pipeline_status', { repo: 'repo2' }), /running build or deploy/, 'no switch away from a running build');
     mcp.kill();
     // Audit trail: the agent's key can't deploy, and every call, refused ones too, is logged with the agent's name.
     const agentKey = JSON.parse(sh(home, 'cat .cicd-at-home/mcp.json')).token;
@@ -98,9 +107,11 @@ esac
     for (let i = 0; i < 50 && !sh(home, 'cat .cicd-at-home/agent-log.jsonl').includes('rogue'); i++) await new Promise((r) => setTimeout(r, 100));
     const audit = sh(home, 'cat .cicd-at-home/agent-log.jsonl').trim().split('\n').map((l) => JSON.parse(l));
     assert.deepEqual(audit.map((a) => [a.agent, a.action, a.ok]), [['claude-code 2.1', 'status', true], ['claude-code 2.1', 'build-log', true], ['claude-code 2.1', 'build-log', true],
-      ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['rogue', 'deploy', false]]);
-    assert.equal(audit[5].build, 2);
-    assert.equal(audit[6].refused, true);
+      ['claude-code 2.1', 'retry', false], ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'status', false], ['claude-code 2.1', 'status', true],
+      ['claude-code 2.1', 'status', true], ['claude-code 2.1', 'prs', true], ['claude-code 2.1', 'build', true], ['claude-code 2.1', 'status', false], ['rogue', 'deploy', false]]);
+    assert.equal(audit[6].args.repo, 'repo2');
+    assert.equal(audit[9].build, 2);
+    assert.equal(audit[11].refused, true);
     await until((s) => s.builds.find((b) => b.number === 2)?.by === 'claude-code 2.1', 'build #2 marked as the agent\'s');
     await until((s) => s.buildOk, 'green build');
     assert.deepEqual(state.stages.find((s) => s.name === 'Checks').steps.map((s) => [s.name, s.status]), [['Lint', 'passed'], ['Tests', 'passed']]);
@@ -137,7 +148,7 @@ esac
     assert.equal(sh(tmp, 'git --git-dir=remote.git show main:pr.txt main:pr2.txt'), 'pr\npr2\n');
     assert.equal(sh(state.deployWork, 'cat deployed.txt').trim(), 'me');
     // Build numbers and what is live survive a restart of the app.
-    const record = JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json'));
+    const record = JSON.parse(sh(home, 'cat .cicd-at-home/builds-repo-*.json'));
     assert.equal(record.next, 5);
     assert.deepEqual(record.live.test.prs, []);
 
@@ -157,7 +168,7 @@ esac
     assert.deepEqual(state.builds.find((b) => b.number === 3).prs.map((p) => p.number), [2]);
     const old = await (await post('/api/build-log', { number: 3 })).json();
     assert.match(old.stages.find((s) => s.id === 'deploy0').log.join('\n'), /== Upload/);
-    assert.equal(JSON.parse(sh(home, 'cat .cicd-at-home/builds-*.json')).builds.length, 6, 'saved for after a restart');
+    assert.equal(JSON.parse(sh(home, 'cat .cicd-at-home/builds-repo-*.json')).builds.length, 6, 'saved for after a restart');
     // Each stage's steps from its last full run, shown in the stage before a build reaches it. PR numbers are generic.
     assert.deepEqual(state.planned.Checks, ['Lint', 'Tests']);
     assert.deepEqual(state.planned['Merge on GitHub'], ['Main unchanged', 'Main matches the tested batch']);
@@ -200,7 +211,9 @@ esac
     const rel = state.stages.find((s) => s.id === 'deploy0');
     assert.equal(rel.status, 'stopped');
     assert.equal(rel.interrupted, true);
-    assert.equal(rel.log.at(-1), 'The app stopped while this stage ran. Retry runs it again.');
+    // Logs come with the first state on connect only; a later state (say the PR list loading) has none, so ask for them.
+    const relLog = (await (await post('/api/build-log', { number: 8 })).json()).stages.find((s) => s.id === 'deploy0').log;
+    assert.equal(relLog.at(-1), 'The app stopped while this stage ran. Retry runs it again.');
     assert.equal(state.builds.find((b) => b.number === 8).status, 'failed');
     assert.equal(sh(tmp, 'git --git-dir=remote.git rev-list --count main'), merges0, 'no merge on restart');
     writeFileSync(join(tmp, 'gate'), '');
